@@ -1,0 +1,22 @@
+{
+  "name": "envsync-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.10.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@envsync/core": "workspace:*",
+    "@envsync/parser-next": "workspace:*",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
+  }
+}
