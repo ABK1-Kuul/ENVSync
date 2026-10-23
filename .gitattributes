@@ -1,0 +1,3 @@
+# Check out text files with LF on every platform (Windows runners default to core.autocrlf=true).
+# Tests assert byte-exact output built from fixtures, so line endings must not depend on the OS.
+* text=auto eol=lf
