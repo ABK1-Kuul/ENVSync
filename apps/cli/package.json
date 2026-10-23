@@ -1,0 +1,13 @@
+{
+  "name": "@envsync/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "envsync": "./dist/bin.js"
+  },
+  "dependencies": {
+    "@envsync/core": "workspace:*",
+    "@envsync/parser-next": "workspace:*"
+  }
+}
