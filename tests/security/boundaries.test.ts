@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isUnsafeCodePoint } from "@envsync-internal/core";
 import { describe, expect, test } from "vitest";
 
 /**
@@ -22,6 +23,9 @@ const FORBIDDEN: [string, RegExp][] = [
   // Bare calls only: `regex.exec(...)` is legitimate, and `cp.exec(...)` is caught by the module rule above.
   ["process spawning", /(?<![.\w])(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(/],
   ["TypeScript program emit or module loading", /\bts\.(?:createProgram|createWatchProgram|sys\.require)\b/],
+  // ts.sys gives TypeScript real filesystem/module access; parsing never needs it.
+  ["TypeScript system host", /\bts\.sys\b/],
+  ["module loader APIs", /from\s+["'](?:node:)?module["']|\bprocess\.dlopen\b|\bimport\.meta\.resolve\b|\bprocess\.binding\b/],
 ];
 
 async function listSourceFiles(directory: string): Promise<string[]> {
@@ -47,15 +51,8 @@ describe("product source cannot execute project code or reach the network", asyn
   });
 
   test("no invisible control, line-separator or bidi characters hide in product or test source", async () => {
-    const isHidden = (code: number) =>
-      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x200e ||
-      code === 0x200f ||
-      code === 0x2028 ||
-      code === 0x2029 ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069);
+    // Same table as output sanitization; tab, CR and LF are ordinary in source files.
+    const isHidden = (code: number) => code !== 0x09 && code !== 0x0d && isUnsafeCodePoint(code, { allowNewline: true });
     const testDirs = ["packages/core/test", "packages/schema/test", "packages/parser-next/test", "apps/cli/test", "tests"];
     const testFiles = (await Promise.all(testDirs.map((dir) => listSourceFiles(path.join(REPO_ROOT, dir))))).flat();
     const offenders: string[] = [];
@@ -69,6 +66,12 @@ describe("product source cannot execute project code or reach the network", asyn
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("CI installs exactly the pnpm version pinned in packageManager", async () => {
+    const manifest = JSON.parse(await readFile(path.join(REPO_ROOT, "package.json"), "utf8")) as { packageManager: string };
+    const workflow = await readFile(path.join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
+    expect(workflow).toContain(`npm install --global ${manifest.packageManager}`);
   });
 
   test("the only TypeScript compiler entry points used are parse-only", async () => {

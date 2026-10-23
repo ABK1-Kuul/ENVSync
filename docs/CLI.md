@@ -51,16 +51,28 @@ Previews a starter `envsync.config.ts` and `.env.example`. **Nothing is written 
 | No `.env.example` | Create it with an empty `NAME=` placeholder for every declared variable. |
 | `.env.example` exists | Append a `# Added by envsync init` block with placeholders for declared variables it does not list. Existing lines are kept byte-for-byte, and CRLF line endings are preserved. |
 
+`--write` plans again and applies that plan in the same run; it does not replay an earlier preview.
+If the files changed since you looked at the preview, the `--write` output shows what was actually
+written. All checks below happen at write time.
+
 Safety guarantees:
 - Generated files contain only variable names, comments and empty placeholders. `.env`/`.env.*`
   files are never read, so no local value can be copied. The preview never shows the existing
   contents of any file.
-- New files are created exclusively: if a file appeared between the preview and `--write`, it is
-  left untouched and `init` exits with code 2. An append is refused if `.env.example` changed
-  since the preview (compared by SHA-256). Symlinked targets are refused.
+- New files are created exclusively: a file that appears between planning and writing is left
+  untouched, and `init` exits with code 2. If writing a new file fails part-way, the incomplete
+  file is removed.
+- An append goes through one verified file handle: the opened file must be the regular,
+  single-link file that was checked (same device and inode, so symlink or hard-link swaps are
+  refused on every platform), and its content must be unchanged since planning (SHA-256). If the
+  append fails part-way, the file is truncated back to its original content.
+- If `.env.example` ends inside a quoted value that is never closed, appended lines would become
+  part of that value, so `init` shows "Cannot update" and `--write` refuses to change anything
+  (exit 2). The same happens if the appended placeholders would not read back as entries.
+- If the existing config has problems, `.env.example` is not planned from it ("not checked").
 - Running `init --write` again is a no-op ("Nothing to change").
-- Dynamic `process.env` accesses and names that are not valid variable names are reported, not
-  guessed.
+- Dynamic `process.env` accesses, names that are not valid variable names, and names that
+  differ only by letter case are reported in the preview, not guessed.
 
 ## `envsync doctor`
 
@@ -79,11 +91,23 @@ reads the contents of `.env`/`.env.*` files (it lists their names only).
 | `framework` | | `next` is not a dependency (with a monorepo hint at workspace roots); version ranges are never printed |
 | `config` | `envsync.config.ts` is missing or has problems | |
 | `env-example` | `.env.example` is symlinked or oversized | it is missing, or has lines that are not `KEY=value` (reported by line number only) |
-| `env-files-ignored` | a `.env*.local` file exists and is not ignored by git | a shared `.env`/`.env.<mode>` file is not ignored, or `.env.local` would not be ignored if created |
+| `env-files-ignored` | a `.env*.local` file is tracked by git (committed), or exists and is not ignored | a shared `.env`/`.env.<mode>` file is committed or not ignored; `.env.local` would not be ignored if created; or the git index could not be read, so tracking was not checked |
 
-`env-files-ignored` reports `skip` outside a git repository. Ignore rules are evaluated from
-`.gitignore` files between the project and the repository root plus `.git/info/exclude`; the
-global excludes file and already-tracked files are not checked.
+`env-files-ignored` reports `skip` outside a git repository. `.local` matching is case-insensitive.
+
+How the git checks work without running git:
+- **Tracked files** are read from `.git/index` (versions 2–4; file names only). An already
+  committed file stays tracked even if `.gitignore` lists it, so this is checked first. If the
+  index cannot be read (for example in a linked worktree, where `.git` is a file), the check
+  warns instead of passing.
+- **Ignore rules** come from `.gitignore` files between the project and the repository root plus
+  `.git/info/exclude`, evaluated with git's own rules: LF line splitting, only trailing ASCII
+  spaces trimmed, wildmatch globbing where `*`, `?` and `[...]` never match `/`, invalid patterns
+  matching nothing, and `core.ignorecase` from `.git/config`. Matching runs in linear time, so a
+  hostile `.gitignore` cannot hang `doctor`; files beyond 10,000 rules or 4,096-character
+  patterns are cut off and the message says so. The behaviour is tested against `git
+  check-ignore`.
+- Not checked: the global excludes file (`core.excludesFile`).
 
 JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "skip", "exitCode" }, "checks": [{ "id", "status", "message", "suggestion"? }] }`.
 
@@ -93,26 +117,27 @@ JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "skip",
 |---|---|
 | `0` | `scan`: no errors (with `--strict`, also no warnings; info never counts). `init`: preview shown or changes written. `doctor`: no failed checks. |
 | `1` | `scan`: at least one error, or (with `--strict`) at least one warning. `doctor`: at least one failed check. |
-| `2` | Usage error (including an option that does not belong to the command), or the command could not run: missing or unreadable project directory, missing `envsync.config.ts` for `scan`, a config or `.env.example` that is a symlink / not a regular file / over 1 MB, or a file that changed between the `init` preview and `--write`. The reason is printed to stderr. |
+| `2` | Usage error (including an option that does not belong to the command), or the command could not run. For `scan` and `init`: missing or unreadable project directory, a config or `.env.example` that is a symlink / not a regular file / over 1 MB; for `scan`, a missing `envsync.config.ts`; for `init --write`, a file that changed between planning and writing, a blocked change, or a failed write. The reason is printed to stderr. (`doctor` reports a missing directory as a failed check, exit 1.) |
 
 ## Config file: `envsync.config.ts`
 
 The config is **parsed, never executed** (ADR-002, ADR-005). Only this literal subset is understood:
 
 ```ts
-import { defineConfig } from "envsync"; // optional; the import is never resolved
-
-export default defineConfig({
+export default {
   variables: {
     DATABASE_URL: { required: true, secret: true, type: "url", description: "Postgres connection string" },
     NEXT_PUBLIC_SITE_URL: { secret: false, type: "url" },
     LOG_LEVEL: { required: false },
   },
-});
+};
 ```
 
-- The default export may be an object literal, `defineConfig({...})`, either wrapped in
-  `as const` / `satisfies T` / parentheses, or a top-level `const` holding one of those.
+- The default export may be an object literal, either wrapped in `as const` / `satisfies T` /
+  parentheses, or a top-level `const` holding one. A `defineConfig({...})` wrapper is also
+  accepted (its argument is read; it is never called), but the `envsync` package does not export
+  `defineConfig`, so do not import it from `envsync`: a plain object needs no import and
+  type-checks in any project.
 - `variables` keys must be literal names matching `[A-Za-z_][A-Za-z0-9_]*`.
 - Fields, all optional:
 
@@ -189,9 +214,26 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 
 - `file` is relative to the project root with `/` separators. `file`, `line`, `column`,
   `variableName` and `suggestion` are omitted when not applicable.
-- `skipped[].reason` is one of `symlink`, `unreadable`, `too-large`, `parse-failed`.
+- `skipped[].reason` is one of `symlink`, `unreadable`, `too-large`, `parse-failed`,
+  `limit-reached` (see [Resource limits](#resource-limits)).
 - Diagnostics are sorted by file (project-level findings last), line, column, code and name.
-- Control, C1 and bidi-override characters from repository content are escaped as `\uXXXX`.
+- Repository-controlled text is escaped as `\uXXXX` (surrogate pairs above U+FFFF) in every output
+  format and on stderr: C0/C1 controls, DEL, soft hyphen, zero-width and invisible characters,
+  line/paragraph separators, bidi marks/embeddings/overrides/isolates (including U+061C), the
+  byte-order mark, interlinear annotations, tag characters and lone surrogates. In terminal output
+  newlines inside a name are escaped too, so they cannot forge extra lines.
+- Config syntax errors are reported by TypeScript diagnostic code only (for example
+  `has a syntax error (TS1005).`), never with TypeScript's message text, which can quote source.
+
+## Resource limits
+
+| Limit | Value | When exceeded |
+|---|---|---|
+| Size of any single file read | 1,000,000 bytes | source files are skipped (`too-large`); config/`.env.example` stop the command (exit 2) |
+| Source files per scan | 20,000 | remaining files are skipped and listed once as `limit-reached` |
+| Total source bytes per scan | 200,000,000 | as above |
+| `.gitignore` rules per file / pattern length | 10,000 / 4,096 characters | extra rules are not evaluated; `doctor` says so |
+| `.git/index` size | 256 MiB | tracking is reported as not checked (warning) |
 - Messages are for humans; automation should rely on `code`, `severity` and location fields.
 
 ## Known limitations
@@ -203,6 +245,7 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
   (this would need a new diagnostic code).
 - Malformed `.env.example` lines are ignored by `scan`; `doctor` reports them by line number.
 - `type` and `description` are validated but not yet used.
-- The example config imports `defineConfig` from `envsync`; until a package is published, omit
-  the import and export the object directly (as `envsync init` generates).
+- `scan` reports any string used as a `process.env["..."]` key as `variableName`, even if it is not
+  a valid variable name.
+- `doctor` does not read the global git excludes file.
 - Linting is not configured in this repository yet.

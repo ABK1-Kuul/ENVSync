@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -b tsconfig.build.json",
-    "bundle": "pnpm --filter envsync run bundle"
+    "bundle": "pnpm --filter envsync run bundle",
+    "stage": "pnpm --filter envsync run stage"
   },
   "devDependencies": {
     "@envsync-internal/core": "workspace:*",

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyInitPlan, InitError, planInit } from "@envsync-internal/core";
 import { nextFramework } from "@envsync-internal/parser-next";
@@ -176,5 +176,87 @@ describe("envsync init never copies values", () => {
     expect(example.slice(`DATABASE_URL=${FAKE_SECRET}\n`.length)).toBe(
       "# Added by `envsync init`\nAUTH_SECRET=\nLOG_LEVEL=\nNEXT_PUBLIC_SITE_URL=\n",
     );
+  });
+});
+
+describe("envsync init: refuses changes that would not be safe or would not stick", () => {
+  test("an unterminated quote in .env.example blocks the append; --write changes nothing and exits 2", async () => {
+    fixture = await copyFixture("next-app-router");
+    const root = fixture.root;
+    await writeFile(path.join(root, EXAMPLE), 'DATABASE_URL="postgres://placeholder\n');
+    const before = await snapshot(root);
+
+    const preview = await runCli(["init"], root);
+    expect(preview.exitCode).toBe(0);
+    expect(preview.stdout).toContain(`Cannot update ${EXAMPLE}: line 1 starts a quoted value that is never closed`);
+    expect(preview.stdout).toContain("`--write` will refuse to change anything until then.");
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const write = await runCli(["init", "--write"], root);
+      expect(write.exitCode).toBe(2);
+      expect(write.stderr).toContain("No files were changed.");
+      expect(await snapshot(root)).toEqual(before);
+    }
+  });
+
+  test("a config with problems is not used to plan .env.example", async () => {
+    fixture = await copyFixture("next-app-router");
+    await writeFile(path.join(fixture.root, CONFIG), "export default makeConfig();");
+    const run = await runCli(["init"], fixture.root);
+    expect(run.stdout).toContain(`Unchanged ${EXAMPLE}: not checked because ${CONFIG} has 1 problem(s).`);
+    expect(run.stdout).not.toContain("already lists every declared variable");
+  });
+
+  test("names that differ only by case are flagged in the preview", async () => {
+    fixture = await copyFixture("next-app-router");
+    await writeFile(path.join(fixture.root, CONFIG), "export default { variables: { API_URL: {}, api_url: {} } };");
+    await writeFile(path.join(fixture.root, EXAMPLE), "");
+    const run = await runCli(["init"], fixture.root);
+    expect(run.stdout).toContain("Note: API_URL and api_url differ only by letter case");
+  });
+
+  test("a hard-linked .env.example is refused, so a file outside the project cannot be appended to", async () => {
+    fixture = await copyFixture("next-pages-router");
+    const root = fixture.root;
+    const outside = path.join(path.dirname(root), "outside.env");
+    await writeFile(outside, await readFile(path.join(root, EXAMPLE)));
+    await rm(path.join(root, EXAMPLE));
+    await link(outside, path.join(root, EXAMPLE));
+    const outsideBefore = await readFile(outside, "utf8");
+
+    const run = await runCli(["init", "--write"], root);
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain("has more than one hard link");
+    expect(await readFile(outside, "utf8")).toBe(outsideBefore);
+  });
+
+  test("a .env.example swapped for a symlink after planning is refused", async (context) => {
+    fixture = await copyFixture("next-pages-router");
+    const root = fixture.root;
+    const plan = await planInit({ root, framework: nextFramework });
+    const outside = path.join(path.dirname(root), "outside.env");
+    // Identical content, so only the identity check (not the hash) can catch the swap.
+    await writeFile(outside, await readFile(path.join(root, EXAMPLE)));
+    const outsideBefore = await readFile(outside, "utf8");
+    await rm(path.join(root, EXAMPLE));
+    try {
+      await symlink(outside, path.join(root, EXAMPLE), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") context.skip("file symlinks are not permitted for this user on this platform");
+      throw error;
+    }
+
+    const error = await applyInitPlan(root, plan).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "FILE_CHANGED" });
+    expect(await readFile(outside, "utf8")).toBe(outsideBefore);
+  });
+
+  test("plans that target any other path are refused before anything is written", async () => {
+    const root = await bareProject();
+    const plan = await planInit({ root, framework: nextFramework });
+    const tampered = { ...plan, changes: [...plan.changes, { path: "../escape.txt", action: "create" as const, content: "x" }] };
+    const before = await snapshot(root);
+    await expect(applyInitPlan(root, tampered)).rejects.toMatchObject({ code: "BLOCKED" });
+    expect(await snapshot(root)).toEqual(before);
   });
 });

@@ -1,6 +1,7 @@
 {
   "name": "envsync",
   "version": "0.0.0",
+  "private": true,
   "description": "Local-first checks that keep a Next.js project's environment variables, envsync.config.ts and .env.example in sync, without reading or printing secret values.",
   "license": "Apache-2.0",
   "type": "module",
@@ -36,7 +37,7 @@
   },
   "scripts": {
     "bundle": "node scripts/bundle.mjs",
-    "prepack": "node scripts/bundle.mjs"
+    "stage": "node scripts/stage.mjs"
   },
   "dependencies": {
     "typescript": "6.0.3"

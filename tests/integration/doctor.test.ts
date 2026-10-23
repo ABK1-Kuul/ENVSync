@@ -1,7 +1,20 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { runDoctor } from "@envsync-internal/core";
+import { nextFramework } from "@envsync-internal/parser-next";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { copyFixture, FAKE_SECRET, runCli, type FixtureCopy } from "../helpers.js";
+
+// Tests may use git as a reference tool; product code never runs it.
+const hasGit = (() => {
+  try {
+    execFileSync("git", ["--version"]);
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 // Record every path whose contents are read, to prove doctor never opens .env files.
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -119,13 +132,60 @@ describe("envsync doctor", () => {
     expect(run.json.checks.find((c) => c.id === "env-files-ignored")).toMatchObject({ status: "warn" });
   });
 
-  test("outside a git repository the ignore check is skipped, not passed", async () => {
+  test("outside a git repository the git checks are skipped, not passed", async () => {
     fixture = await copyFixture("next-app-router");
-    const run = await doctor(fixture.root);
+    // The ceiling stops the search at the fixture, so a .git higher up on this machine cannot interfere.
+    const checks = await runDoctor({ root: fixture.root, framework: nextFramework, gitSearchCeiling: fixture.root });
+    expect(checks.find((c) => c.id === "env-files-ignored")).toMatchObject({
+      status: "skip",
+      message: "Not inside a git repository, so the git checks were skipped.",
+    });
+  });
+
+  test("a .env.LOCAL file is treated as local (case-insensitive), so not ignoring it fails", async () => {
+    const root = await healthyRepo("node_modules/\n");
+    await writeFile(path.join(root, ".env.LOCAL"), "X=\n");
+    const run = await doctor(root);
+    expect(run.json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("fail");
+  });
+
+  test.skipIf(!hasGit)("a committed .env.local fails even when .gitignore lists it", async () => {
+    fixture = await copyFixture("next-app-router");
+    const root = fixture.root;
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    await writeFile(path.join(root, ".gitignore"), ".env*.local\n");
+    await writeFile(path.join(root, ".env.local"), `SECRET=${FAKE_SECRET}\n`);
+    execFileSync("git", ["-C", root, "add", "-f", ".env.local"]);
+
+    const run = await doctor(root);
+    expect(run.exitCode).toBe(1);
     const check = run.json.checks.find((c) => c.id === "env-files-ignored");
-    // A developer machine may have a .git higher up; the check is only "skip" when none exists.
-    expect(["skip", "pass", "warn", "fail"]).toContain(check?.status);
-    if (check?.status === "skip") expect(check.message).toContain("Not inside a git repository");
+    expect(check).toMatchObject({ status: "fail" });
+    expect(check?.message).toContain(".env.local is tracked by git");
+    expect(check?.suggestion).toContain("git rm --cached");
+    expect(run.stdout).not.toContain(FAKE_SECRET);
+
+    execFileSync("git", ["-C", root, "rm", "-q", "--cached", ".env.local"]);
+    expect((await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("pass");
+  });
+
+  test("when the git index cannot be read, an ignored env file is a warning, not a pass", async () => {
+    const root = await healthyRepo();
+    await mkdir(path.join(root, ".git", "index")); // not a regular file
+    await writeFile(path.join(root, ".env.local"), "X=\n");
+    const check = (await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored");
+    expect(check?.status).toBe("warn");
+    expect(check?.message).toContain("was not checked");
+  });
+
+  test("a hostile .gitignore cannot crash or hang doctor", async () => {
+    const root = await healthyRepo(`[z-a]\n${"*a".repeat(80)}*b\n.env*.local\n`);
+    await writeFile(path.join(root, `.env.${"a".repeat(200)}`), "X=\n");
+    const started = performance.now();
+    const run = await doctor(root);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    expect(run.stderr).toBe("");
+    expect(run.json.checks.find((c) => c.id === "env-files-ignored")).toBeDefined();
   });
 
   test("missing config fails; missing .env.example warns", async () => {

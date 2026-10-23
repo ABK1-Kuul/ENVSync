@@ -24,7 +24,7 @@ EMPTY_QUOTED=""
   });
 
   test("handles CRLF, CR and a byte-order mark", () => {
-    expect(parseEnvExample("﻿A=1\r\nB=2\rC=3").entries.map((entry) => entry.name)).toEqual(["A", "B", "C"]);
+    expect(parseEnvExample(String.fromCharCode(0xfeff) + "A=1\r\nB=2\rC=3").entries.map((entry) => entry.name)).toEqual(["A", "B", "C"]);
   });
 
   test("reports every repeat against the first line, in file order, before entries are collapsed", () => {
@@ -61,6 +61,11 @@ LAST=1
 `);
     expect(result.entries.map((entry) => entry.name)).toEqual(["PRIVATE_KEY", "NEXT", "SINGLE", "ESCAPED", "LAST"]);
     expect(result.entries.find((entry) => entry.name === "LAST")?.line).toBe(9);
+  });
+
+  test("reports the line where a never-closed quoted value starts", () => {
+    expect(parseEnvExample('A=1\nB="open\nC=2\n').unterminatedQuoteLine).toBe(2);
+    expect(parseEnvExample('A="closed\nstill"\nB=1\n').unterminatedQuoteLine).toBeUndefined();
   });
 
   test("an unterminated quoted value consumes the rest of the file instead of inventing entries", () => {

@@ -1,3 +1,4 @@
+import { isUnsafeCodePoint } from "./text-safety.js";
 import { isValidVariableName } from "./validation.js";
 
 /**
@@ -50,7 +51,9 @@ export function renderEnvExample(names: readonly string[]): string {
 /** Text to append to an existing `.env.example`, matching its line endings. */
 export function renderEnvExampleAppend(existingText: string, names: readonly string[]): string {
   const eol = existingText.includes("\r\n") ? "\r\n" : "\n";
-  const separator = existingText.length === 0 || /[\r\n]$/.test(existingText) ? "" : eol;
+  // A file holding only a byte-order mark counts as empty, so no blank line follows the BOM.
+  const content = existingText.charCodeAt(0) === 0xfeff ? existingText.slice(1) : existingText;
+  const separator = content.length === 0 || /[\r\n]$/.test(content) ? "" : eol;
   return `${separator}${["# Added by `envsync init`", ...placeholders(names)].join(eol)}${eol}`;
 }
 
@@ -66,21 +69,8 @@ function assertValidName(name: string): void {
   if (!isValidVariableName(name)) throw new Error(`Refusing to generate an entry for an invalid variable name.`);
 }
 
-// Paths come from the filesystem; replace anything that could end the comment line or confuse a
-// terminal. Numeric code points keep invisible characters out of this source file.
+// Paths come from the filesystem; replace anything that could end the comment line, hide text or
+// confuse a terminal (same table as CLI output sanitization).
 function commentSafe(text: string): string {
-  return Array.from(text, (char) => (isUnsafeInComment(char.codePointAt(0) as number) ? "?" : char)).join("");
-}
-
-function isUnsafeInComment(code: number): boolean {
-  return (
-    code <= 0x1f ||
-    (code >= 0x7f && code <= 0x9f) ||
-    code === 0x200e ||
-    code === 0x200f ||
-    code === 0x2028 ||
-    code === 0x2029 ||
-    (code >= 0x202a && code <= 0x202e) ||
-    (code >= 0x2066 && code <= 0x2069)
-  );
+  return Array.from(text, (char) => (isUnsafeCodePoint(char.codePointAt(0) as number) ? "?" : char)).join("");
 }
