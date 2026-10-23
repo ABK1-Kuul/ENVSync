@@ -16,6 +16,7 @@ import { EXIT_FINDINGS, EXIT_OK, EXIT_USAGE, exitCodeFor } from "./exit-codes.js
 import { countChecks, formatDoctorJson, formatDoctorTerminal } from "./formatters/doctor.js";
 import { formatInitPlan } from "./formatters/init.js";
 import { formatJson } from "./formatters/json.js";
+import { sanitizeForOutput } from "./formatters/sanitize.js";
 import { formatTerminal } from "./formatters/terminal.js";
 
 export const VERSION = "0.0.0";
@@ -127,10 +128,10 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
     }
   } catch (error) {
     if (error instanceof ScanError || error instanceof DiscoveryError || error instanceof InitError) {
-      io.stderr(`envsync: ${error.message}\n`);
+      printError(io, error.message);
       return EXIT_USAGE;
     }
-    io.stderr(`envsync: Unexpected internal error (${error instanceof Error ? error.name : "unknown"}). Please report this issue.\n`);
+    printError(io, `Unexpected internal error (${error instanceof Error ? error.name : "unknown"}). Please report this issue.`);
     return EXIT_USAGE;
   }
 }
@@ -180,8 +181,14 @@ export function compareVersions(a: string, b: string): number {
 }
 
 function usageError(io: CliIO, message: string): number {
-  io.stderr(`envsync: ${message}\nRun \`envsync --help\` for usage.\n`);
+  printError(io, message);
+  io.stderr("Run `envsync --help` for usage.\n");
   return EXIT_USAGE;
+}
+
+/** Error text can contain argv, paths and directory names, so it is sanitized like stdout. */
+function printError(io: CliIO, message: string): void {
+  io.stderr(`${sanitizeForOutput(`envsync: ${message}`)}\n`);
 }
 
 function isCommand(value: string): value is Command {

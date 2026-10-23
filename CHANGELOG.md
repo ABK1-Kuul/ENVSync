@@ -29,3 +29,24 @@ output shape are public contracts (ADR-003); changes to them are called out expl
   network APIs.
 - Symlinks are never followed; oversized files are skipped; terminal/JSON output escapes control
   and bidi characters from repository content.
+- Hardening from the Sprint 2 security and code reviews:
+  - `doctor` fails when a `.env*.local` file is already tracked by git (read from `.git/index`),
+    instead of passing because `.gitignore` lists it; warns when tracking cannot be checked.
+  - `.gitignore` evaluation now follows git exactly (verified against `git check-ignore`), runs in
+    linear time, and cannot be crashed by malformed patterns.
+  - `init --write` verifies file identity through the open handle (symlink and hard-link swaps are
+    refused on every platform), rolls back failed appends, removes incomplete new files, and
+    refuses appends that would land inside an unterminated quoted value.
+  - Reads of project files go through a verified handle, closing a check-then-read race.
+  - Output and stderr escape zero-width, invisible, tag and lone-surrogate characters and newlines
+    inside names; config syntax errors are reported by TypeScript code only.
+  - Scans stop at 20,000 files or 200 MB of source and disclose it (`limit-reached`).
+  - Documentation recommends running `npx envsync` outside the checkout, so a repository's
+    `.npmrc` cannot change what runs.
+
+### Fixed
+- Windows CI: `.gitattributes` fixes line endings to LF; CI installs the pinned pnpm directly
+  because the Corepack bundled with Node 22.12.0 cannot run pnpm 12.
+- `init` no longer appends the same block repeatedly to a `.env.example` that ends inside an
+  unclosed quote, and no longer reports "already lists every declared variable" for a broken config.
+- Documentation no longer suggests importing `defineConfig` from `envsync` (it is not exported).

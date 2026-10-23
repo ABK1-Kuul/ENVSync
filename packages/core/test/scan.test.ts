@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { scanProject, ScanError, type FrameworkAdapter } from "../src/index.js";
+import { collectSourceEvidence } from "../src/project-files.js";
 
 const parserControl = vi.hoisted(() => ({ throwOnParse: false }));
 
@@ -67,6 +68,17 @@ describe("scanProject", () => {
     const result = await scanProject({ root, framework });
     expect(result.filesScanned).toBe(1);
     expect(result.skipped).toEqual([{ path: "bad.ts", reason: "parse-failed" }]);
+  });
+
+  test("file-count and total-size limits stop the scan and are disclosed once", async () => {
+    for (const name of ["a.ts", "b.ts", "c.ts", "d.ts"]) await writeFile(path.join(root, name), "x".repeat(10));
+    const byCount = await collectSourceEvidence(root, framework, { maxFiles: 2, maxTotalBytes: 1_000 });
+    expect(byCount.filesScanned).toBe(2);
+    expect(byCount.skipped).toEqual([{ path: "c.ts", reason: "limit-reached" }]);
+
+    const bySize = await collectSourceEvidence(root, framework, { maxFiles: 100, maxTotalBytes: 15 });
+    expect(bySize.filesScanned).toBe(2);
+    expect(bySize.skipped).toEqual([{ path: "c.ts", reason: "limit-reached" }]);
   });
 
   test("the config file itself is not scanned as source", async () => {

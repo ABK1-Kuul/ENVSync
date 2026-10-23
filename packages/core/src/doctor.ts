@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseEnvExample } from "@envsync-internal/schema";
 import { discoverSourceFiles, DiscoveryError } from "./discovery.js";
 import type { FrameworkAdapter } from "./framework.js";
-import { isIgnoredFile, loadIgnoreContext } from "./gitignore.js";
+import { isIgnoredFile, isTrackedFile, loadIgnoreContext } from "./gitignore.js";
 import { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, readProjectFile, ScanError } from "./project-files.js";
 import { parseConfigSafely } from "./scan.js";
 
@@ -19,7 +19,14 @@ export type DoctorCheck = { id: string; status: DoctorStatus; message: string; s
 
 const EXAMPLE_LIKE_SUFFIXES = [".example", ".sample", ".template", ".dist"];
 
-export async function runDoctor({ root, framework }: { root: string; framework: FrameworkAdapter }): Promise<DoctorCheck[]> {
+export type DoctorOptions = {
+  root: string;
+  framework: FrameworkAdapter;
+  /** Stops the search for an enclosing git repository at this directory (used by tests). */
+  gitSearchCeiling?: string;
+};
+
+export async function runDoctor({ root, framework, gitSearchCeiling }: DoctorOptions): Promise<DoctorCheck[]> {
   const absoluteRoot = path.resolve(root);
   const checks: DoctorCheck[] = [];
 
@@ -47,7 +54,7 @@ export async function runDoctor({ root, framework }: { root: string; framework: 
   checks.push(...(await checkPackageJson(absoluteRoot, framework)));
   checks.push(await checkConfig(absoluteRoot));
   checks.push(await checkEnvExample(absoluteRoot));
-  checks.push(await checkLocalEnvFiles(absoluteRoot));
+  checks.push(await checkLocalEnvFiles(absoluteRoot, gitSearchCeiling));
   return checks;
 }
 
@@ -167,38 +174,56 @@ async function checkEnvExample(root: string): Promise<DoctorCheck> {
   return { id: "env-example", status: "pass", message: `${ENV_EXAMPLE_FILE_NAME} lists ${count} ${count === 1 ? "variable" : "variables"}.` };
 }
 
-async function checkLocalEnvFiles(root: string): Promise<DoctorCheck> {
+async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Promise<DoctorCheck> {
   // Names only: the contents of these files are never opened.
   const present = (await readdir(root, { withFileTypes: true }))
     .filter((entry) => !entry.isDirectory() && isLocalEnvFileName(entry.name))
     .map((entry) => entry.name)
     .sort();
 
-  const context = await loadIgnoreContext(root);
+  const context = await loadIgnoreContext(root, ceiling === undefined ? {} : { ceiling });
   if (context.repositoryRoot === null) {
     return {
       id: "env-files-ignored",
       status: "skip",
-      message: "Not inside a git repository, so the .gitignore check was skipped.",
+      message: "Not inside a git repository, so the git checks were skipped.",
     };
   }
 
-  const exposedLocal = present.filter((name) => name.endsWith(".local") && !isIgnoredFile(context, root, name));
+  // Next.js treats `.env*.local` as machine-local secrets; matching is case-insensitive because
+  // Windows and macOS file systems are.
+  const isLocal = (name: string) => name.toLowerCase().endsWith(".local");
+  const truncatedNote = context.truncated ? " Some ignore rules exceeded EnvSync's size limits and were not evaluated." : "";
+
+  // An ignore rule does not untrack a committed file, so tracking is checked first.
+  const tracked = present.filter((name) => isTrackedFile(context, root, name) === true);
+  const trackedLocal = tracked.filter(isLocal);
+  if (trackedLocal.length > 0) {
+    return {
+      id: "env-files-ignored",
+      status: "fail",
+      message: `${trackedLocal.join(", ")} ${trackedLocal.length === 1 ? "is" : "are"} tracked by git, so changes to ${trackedLocal.length === 1 ? "it" : "them"} will be committed even if .gitignore lists ${trackedLocal.length === 1 ? "it" : "them"}.`,
+      suggestion:
+        "Run `git rm --cached <file>` and commit, keep `.env*.local` in .gitignore, and rotate any secret that was ever committed.",
+    };
+  }
+
+  const exposedLocal = present.filter((name) => isLocal(name) && !tracked.includes(name) && !isIgnoredFile(context, root, name));
   if (exposedLocal.length > 0) {
     return {
       id: "env-files-ignored",
       status: "fail",
-      message: `${exposedLocal.join(", ")} ${exposedLocal.length === 1 ? "is" : "are"} not ignored by git, so local secrets could be committed.`,
-      suggestion: "Add `.env*.local` to .gitignore. If already committed, remove it from git history and rotate the secrets it contains.",
+      message: `${exposedLocal.join(", ")} ${exposedLocal.length === 1 ? "is" : "are"} not ignored by git, so local secrets could be committed.${truncatedNote}`,
+      suggestion: "Add `.env*.local` to .gitignore.",
     };
   }
 
-  const exposedShared = present.filter((name) => !name.endsWith(".local") && !isIgnoredFile(context, root, name));
-  if (exposedShared.length > 0) {
+  const trackedOrExposedShared = present.filter((name) => !isLocal(name) && (tracked.includes(name) || !isIgnoredFile(context, root, name)));
+  if (trackedOrExposedShared.length > 0) {
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: `${exposedShared.join(", ")} ${exposedShared.length === 1 ? "is" : "are"} not ignored by git. Next.js allows committing these for non-secret defaults only.`,
+      message: `${trackedOrExposedShared.join(", ")} ${trackedOrExposedShared.length === 1 ? "is" : "are"} committed or not ignored by git. Next.js allows committing these for non-secret defaults only.`,
       suggestion: "Make sure they contain no secrets, or add them to .gitignore.",
     };
   }
@@ -207,8 +232,18 @@ async function checkLocalEnvFiles(root: string): Promise<DoctorCheck> {
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: ".env.local would not be ignored by git if you created it.",
+      message: `.env.local would not be ignored by git if you created it.${truncatedNote}`,
       suggestion: "Add `.env*.local` to .gitignore before creating local env files.",
+    };
+  }
+
+  // Without the index, "ignored" alone could be a false assurance: a committed file stays tracked.
+  if (context.tracked.status !== "ok" && present.length > 0) {
+    return {
+      id: "env-files-ignored",
+      status: "warn",
+      message: `${present.join(", ")} ${present.length === 1 ? "matches" : "match"} an ignore rule, but ${context.tracked.reason}, so whether ${present.length === 1 ? "it is" : "they are"} already committed was not checked.`,
+      suggestion: "Run `git ls-files .env*` to confirm no local env file is tracked.",
     };
   }
 
@@ -216,9 +251,9 @@ async function checkLocalEnvFiles(root: string): Promise<DoctorCheck> {
     id: "env-files-ignored",
     status: "pass",
     message:
-      present.length > 0
-        ? `Local env files are ignored by git (${present.join(", ")}). Their contents were not read.`
-        : "No local env files found, and .env.local would be ignored by git.",
+      (present.length > 0
+        ? `Local env files are ignored by git and not tracked (${present.join(", ")}). Their contents were not read.`
+        : "No local env files found, and .env.local would be ignored by git.") + truncatedNote,
   };
 }
 

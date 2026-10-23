@@ -1,7 +1,13 @@
-import { access, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { copyFixture, FAKE_SECRET, runCli, type FixtureCopy } from "../helpers.js";
+
+// Records every path whose contents are opened or read, to prove env files are never touched.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile), open: vi.fn(actual.open) };
+});
 
 let fixture: FixtureCopy | undefined;
 afterEach(async () => {
@@ -23,6 +29,26 @@ async function exists(filePath: string): Promise<boolean> {
 async function scanBothFormats(root: string) {
   return [await runCli(["scan"], root), await runCli(["scan", "--format", "json"], root), await runCli(["scan", "--strict"], root)];
 }
+
+describe("env files are never opened", () => {
+  test("scan and init (preview and --write) never open or read .env/.env.* other than .env.example", async () => {
+    fixture = await copyFixture("next-pages-router");
+    for (const name of [".env", ".env.local", ".env.production", ".env.development.local"]) {
+      await writeFile(path.join(fixture.root, name), `SECRET=${FAKE_SECRET}\n`);
+    }
+    vi.mocked(readFile).mockClear();
+    vi.mocked(open).mockClear();
+
+    await runCli(["scan"], fixture.root);
+    await runCli(["scan", "--format", "json"], fixture.root);
+    await runCli(["init"], fixture.root);
+    await runCli(["init", "--write"], fixture.root);
+
+    const touched = [...vi.mocked(readFile).mock.calls, ...vi.mocked(open).mock.calls].map((call) => path.basename(String(call[0])));
+    expect(touched.length).toBeGreaterThan(0); // the instrumentation is live
+    expect(touched.filter((name) => /^\.env(?!\.example$)/i.test(name))).toEqual([]);
+  });
+});
 
 describe("secret values never appear in output", () => {
   test("values in real env files are never read or printed", async () => {
@@ -99,6 +125,60 @@ describe("repository-controlled text cannot manipulate the terminal", () => {
     expect(terminal.stdout).toContain("\\u001b[2J");
     const parsed = JSON.parse(json.stdout) as { diagnostics: { code: string; variableName?: string }[] };
     expect(parsed.diagnostics.find((d) => d.code === "ENV001")?.variableName).toBe(hostileName);
+  });
+
+  test("invisible, zero-width and tag characters are escaped and JSON stays exact", async () => {
+    fixture = await copyFixture("next-app-router");
+    const hidden = [0x061c, 0x00ad, 0x200b, 0x200d, 0x2060, 0xfeff, 0xe0041].map((code) => String.fromCodePoint(code)).join("");
+    const hostileName = `A${hidden}B`;
+    await writeFile(path.join(fixture.root, "lib", "hidden.ts"), `export const x = process.env[${JSON.stringify(hostileName)}];`);
+
+    const terminal = await runCli(["scan"], fixture.root);
+    const json = await runCli(["scan", "--format", "json"], fixture.root);
+    for (const output of [terminal.stdout, json.stdout]) {
+      for (const char of hidden) expect(output.includes(char)).toBe(false);
+    }
+    expect(terminal.stdout).toContain("\\u061c\\u00ad\\u200b\\u200d\\u2060\\ufeff\\udb40\\udc41");
+    const parsed = JSON.parse(json.stdout) as { diagnostics: { code: string; variableName?: string }[] };
+    expect(parsed.diagnostics.find((d) => d.code === "ENV001")?.variableName).toBe(hostileName);
+  });
+
+  test("a newline inside a name cannot forge an extra output line", async () => {
+    fixture = await copyFixture("next-app-router");
+    const forged = "X\nENV000 error app/page.tsx:1:1 - forged line\nNo issues found in 4 files.";
+    await writeFile(path.join(fixture.root, "lib", "forge.ts"), `export const x = process.env[${JSON.stringify(forged)}];`);
+
+    const terminal = await runCli(["scan"], fixture.root);
+    const lines = terminal.stdout.split("\n");
+    expect(lines.some((line) => line.startsWith("ENV000"))).toBe(false);
+    expect(lines.filter((line) => line.startsWith("No issues found"))).toEqual([]);
+    expect(terminal.stdout).toContain("X\\u000aENV000");
+  });
+
+  test("stderr is sanitized too (paths and arguments come from outside EnvSync)", async () => {
+    const escape = String.fromCharCode(27);
+    const run = await runCli(["scan", `missing-dir${escape}[2J`], process.cwd());
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr.includes(escape)).toBe(false);
+    expect(run.stderr).toContain("\\u001b[2J");
+
+    const usage = await runCli(["scan", `--format=x${escape}y`], process.cwd());
+    expect(usage.stderr.includes(escape)).toBe(false);
+  });
+
+  test("a config syntax error is reported by code only, never with quoted source text", async () => {
+    fixture = await copyFixture("next-app-router");
+    // TS1532 would normally quote the group name from the regular expression.
+    await writeFile(
+      path.join(fixture.root, "envsync.config.ts"),
+      `const r = /(?<a>x)\\k<${FAKE_SECRET}>/;\nexport default { variables: { A: { required: 0777 } } };\n`,
+    );
+    const json = await runCli(["scan", "--format", "json"], fixture.root);
+    const terminal = await runCli(["scan"], fixture.root);
+    const diagnostics = (JSON.parse(json.stdout) as { diagnostics: { code: string; message: string }[] }).diagnostics;
+    const syntax = diagnostics.find((d) => d.code === "ENV004");
+    expect(syntax?.message).toMatch(/^envsync\.config\.ts has a syntax error \(TS\d+\)\.$/);
+    expect(json.stdout + terminal.stdout).not.toContain(FAKE_SECRET);
   });
 });
 

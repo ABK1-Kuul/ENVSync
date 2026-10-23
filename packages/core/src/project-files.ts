@@ -1,4 +1,5 @@
-import { lstat, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import path from "node:path";
 import type { FileExposures, FileReferences } from "./analyze.js";
 import { discoverSourceFiles } from "./discovery.js";
@@ -26,8 +27,14 @@ export class ScanError extends Error {
 
 export type SkippedPath = {
   path: string;
-  reason: "symlink" | "unreadable" | "too-large" | "parse-failed";
+  /** `limit-reached` is recorded once, at the first file not scanned because a scan limit was hit. */
+  reason: "symlink" | "unreadable" | "too-large" | "parse-failed" | "limit-reached";
 };
+
+export type ScanLimits = { maxFiles: number; maxTotalBytes: number };
+
+/** Bounds work on hostile or enormous trees; documented in docs/CLI.md ("Resource limits"). */
+export const DEFAULT_SCAN_LIMITS: ScanLimits = { maxFiles: 20_000, maxTotalBytes: 200_000_000 };
 
 export type SourceEvidence = {
   references: FileReferences[];
@@ -37,28 +44,35 @@ export type SourceEvidence = {
 };
 
 /** Discovers and parses source files. Never reads `.env*` files or the EnvSync config as source. */
-export async function collectSourceEvidence(absoluteRoot: string, framework: FrameworkAdapter): Promise<SourceEvidence> {
+export async function collectSourceEvidence(
+  absoluteRoot: string,
+  framework: FrameworkAdapter,
+  limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+): Promise<SourceEvidence> {
   const discovery = await discoverSourceFiles(absoluteRoot);
   const skipped: SkippedPath[] = [...discovery.skipped];
   const references: FileReferences[] = [];
   const exposures: FileExposures[] = [];
   let filesScanned = 0;
+  let filesRead = 0;
+  let totalBytes = 0;
 
   for (const file of discovery.files) {
     if (file === CONFIG_FILE_NAME) continue;
+    if (filesRead >= limits.maxFiles || totalBytes >= limits.maxTotalBytes) {
+      skipped.push({ path: file, reason: "limit-reached" });
+      break;
+    }
     const absolutePath = path.join(absoluteRoot, file);
 
-    let text: string;
-    try {
-      if ((await stat(absolutePath)).size > MAX_FILE_BYTES) {
-        skipped.push({ path: file, reason: "too-large" });
-        continue;
-      }
-      text = await readFile(absolutePath, "utf8");
-    } catch {
-      skipped.push({ path: file, reason: "unreadable" });
+    const read = await readRegularFile(absolutePath);
+    filesRead++;
+    if (!read.ok) {
+      skipped.push({ path: file, reason: read.reason === "too-large" ? "too-large" : "unreadable" });
       continue;
     }
+    const text = read.text;
+    totalBytes += Buffer.byteLength(text, "utf8");
 
     try {
       references.push({ file, references: framework.extractReferences(text, file) });
@@ -85,27 +99,67 @@ export async function collectSourceEvidence(absoluteRoot: string, framework: Fra
  * non-regular files and oversized files so a crafted project cannot redirect reads elsewhere.
  */
 export async function readProjectFile(directory: string, fileName: string): Promise<string | null> {
-  const absolutePath = path.join(directory, fileName);
-  let stats;
+  const read = await readRegularFile(path.join(directory, fileName));
+  if (read.ok) return read.text;
+  switch (read.reason) {
+    case "missing":
+      return null;
+    case "not-regular":
+    case "changed":
+      throw new ScanError(
+        "UNSAFE_PATH",
+        `Refusing to read ${fileName} because it is not a regular file (symbolic links are not followed). Replace it with a regular file inside the project.`,
+      );
+    case "too-large":
+      throw new ScanError("FILE_TOO_LARGE", `${fileName} is larger than ${MAX_FILE_BYTES} bytes. Check that it is the intended file.`);
+    case "unreadable":
+      throw new ScanError("READ_FAILED", `Cannot read ${fileName}. Check that it is readable.`);
+  }
+}
+
+export type RegularFileRead =
+  | { ok: true; text: string }
+  | { ok: false; reason: "missing" | "not-regular" | "too-large" | "changed" | "unreadable" };
+
+/**
+ * Reads a regular file without following links, through one verified handle: the opened file must
+ * be the one `lstat` saw (same device and inode). This closes the check-then-read window in which a
+ * crafted project could swap in a symlink to redirect the read (O_NOFOLLOW where the OS supports it;
+ * the identity check on every platform).
+ */
+export async function readRegularFile(absolutePath: string, maxBytes = MAX_FILE_BYTES): Promise<RegularFileRead> {
+  let before;
   try {
-    stats = await lstat(absolutePath);
+    before = await lstat(absolutePath, { bigint: true });
   } catch (error) {
-    if (isNotFound(error)) return null;
-    throw new ScanError("READ_FAILED", `Cannot access ${fileName}. Check that it is readable.`);
+    return { ok: false, reason: isNotFound(error) ? "missing" : "unreadable" };
   }
-  if (stats.isSymbolicLink() || !stats.isFile()) {
-    throw new ScanError(
-      "UNSAFE_PATH",
-      `Refusing to read ${fileName} because it is not a regular file (symbolic links are not followed). Replace it with a regular file inside the project.`,
-    );
-  }
-  if (stats.size > MAX_FILE_BYTES) {
-    throw new ScanError("FILE_TOO_LARGE", `${fileName} is larger than ${MAX_FILE_BYTES} bytes. Check that it is the intended file.`);
+  if (!before.isFile()) return { ok: false, reason: "not-regular" };
+  if (before.size > BigInt(maxBytes)) return { ok: false, reason: "too-large" };
+
+  let handle;
+  try {
+    handle = await open(absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    return { ok: false, reason: code === "ELOOP" ? "not-regular" : "unreadable" };
   }
   try {
-    return await readFile(absolutePath, "utf8");
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return { ok: false, reason: "changed" };
+    if (opened.size > BigInt(maxBytes)) return { ok: false, reason: "too-large" };
+    const buffer = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return { ok: true, text: buffer.subarray(0, offset).toString("utf8") };
   } catch {
-    throw new ScanError("READ_FAILED", `Cannot read ${fileName}. Check that it is readable.`);
+    return { ok: false, reason: "unreadable" };
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }
 

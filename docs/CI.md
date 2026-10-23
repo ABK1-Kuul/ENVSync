@@ -26,12 +26,23 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      # --strict fails the job on warnings too. Drop it to fail only on errors.
-      - run: npx --yes envsync@<version> scan --strict
+      # Run npx from outside the checkout and pass the project path. Inside the checkout, npm would
+      # read the repository's own .npmrc (registry, node-options, ...), which a pull request can
+      # change to run its own code before EnvSync starts.
+      - name: EnvSync scan
+        working-directory: ${{ runner.temp }}
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+        # --strict fails the job on warnings too. Drop it to fail only on errors.
+        run: npx --yes envsync@<version> scan "$GITHUB_WORKSPACE" --strict
 ```
 
 ## Recommendations
 
+- **Run outside the checkout.** Never run `npx envsync` (or any `npx`) with the untrusted
+  checkout as the working directory: npm loads that directory's `.npmrc`, and a local
+  `node_modules/.bin/envsync` would take precedence. Pass the project path as an argument
+  instead, as above. The same applies locally when you inspect an unfamiliar repository.
 - **Least privilege.** EnvSync needs `contents: read` only. It makes no network requests while
   scanning and needs no secrets: do not pass repository secrets or environment variables to this job.
 - **Pin versions.** Pin EnvSync to an exact version and pin actions to commit SHAs (as above), so
@@ -40,7 +51,8 @@ jobs:
   report as an artifact, it contains variable names and file locations but never values.
 - **Pull requests from forks** run with read-only tokens by default; keep it that way. EnvSync does
   not need `pull_request_target`.
-- **Monorepos.** Run one step per Next.js app: `npx --yes envsync@<version> scan apps/web --strict`.
+- **Monorepos.** Run one step per Next.js app:
+  `npx --yes envsync@<version> scan "$GITHUB_WORKSPACE/apps/web" --strict` (still from `runner.temp`).
 
 ## Exit codes
 
@@ -55,5 +67,12 @@ jobs:
 ## This repository's own CI
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) typechecks, builds and tests EnvSync on
-Ubuntu and Windows with Node.js 22 (including the minimum 22.12.0) and 24, then smoke-tests the
-built CLI. It uses Corepack for pnpm, read-only permissions, SHA-pinned actions, and no caches.
+Ubuntu and Windows with Node.js 22 (including the minimum 22.12.0) and 24. It then stages and
+packs the publishable package outside the checkout, checks its exact contents, installs the
+tarball into a fresh project and runs it.
+
+It installs pnpm with `npm install --global pnpm@<packageManager version>` instead of Corepack: the
+Corepack bundled with Node.js 22.12.0 cannot run pnpm 11 or newer, and Corepack releases that can
+require Node.js 22.22.2 or newer. A test keeps the CI pin equal to `packageManager`. Line endings
+are fixed to LF by `.gitattributes`, so Windows checkouts behave like Linux ones. Permissions are
+read-only, actions are pinned to commit SHAs, and nothing is cached.

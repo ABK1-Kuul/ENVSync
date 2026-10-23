@@ -1,13 +1,10 @@
-// Builds the publishable `envsync` package: one ESM file with the internal workspace packages
-// bundled in, so nothing under @envsync-internal/* is ever resolved from a registry.
-// `typescript` stays external and is the package's only runtime dependency.
-import { copyFile, readFile, writeFile } from "node:fs/promises";
+// Bundles the CLI into apps/cli/dist/envsync.js (gitignored): the internal workspace packages are
+// inlined, so nothing under @envsync-internal/* is ever resolved from a registry, and `typescript`
+// stays external as the only runtime dependency. Publishable contents are assembled by stage.mjs.
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const cliDir = fileURLToPath(new URL("../", import.meta.url));
-const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const repositoryUrl = "https://github.com/ABK1-Kuul/ENVSync/blob/main/";
 
 await build({
   absWorkingDir: cliDir,
@@ -22,15 +19,5 @@ await build({
   external: ["typescript"],
   logLevel: "warning",
 });
-
-await copyFile(`${repoRoot}LICENSE`, `${cliDir}LICENSE`);
-await copyFile(`${repoRoot}CHANGELOG.md`, `${cliDir}CHANGELOG.md`);
-
-// Relative links in the repository README would be broken on npm; point them at GitHub instead.
-const readme = await readFile(`${repoRoot}README.md`, "utf8");
-await writeFile(
-  `${cliDir}README.md`,
-  readme.replace(/\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, target) => `](${repositoryUrl}${target})`),
-);
 
 console.log("Bundled apps/cli/dist/envsync.js");

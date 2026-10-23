@@ -37,10 +37,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # Corepack ships with Node.js 22 and 24 and installs the pnpm version pinned in
-      # package.json "packageManager", so no third-party pnpm action is needed.
-      - name: Enable pnpm
-        run: corepack enable
+      # Not Corepack: the Corepack bundled with Node 22.12.0 cannot run pnpm >= 11, and Corepack
+      # releases that can require Node >= 22.22.2. Installing the exact pinned version works on
+      # every matrix entry without a third-party action. Keep in sync with "packageManager"
+      # (enforced by tests/security/boundaries.test.ts).
+      - name: Install pnpm
+        run: npm install --global pnpm@12.10.1
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -60,11 +62,23 @@ jobs:
         run: node apps/cli/dist/bin.js scan tests/fixtures/next-pages-router --format json > /dev/null || test $? -eq 1
         shell: bash
 
-      # The publishable artifact: one bundled file whose only non-builtin import is typescript.
-      - name: Bundle and check the publishable CLI
+      # The publishable artifact, staged outside the checkout: exactly five files, one bundled
+      # script whose only non-builtin import is typescript, and no internal package names.
+      - name: Stage, pack and check the publishable CLI
         run: |
-          pnpm bundle
-          node apps/cli/dist/envsync.js --version
-          if grep -q '@envsync-internal' apps/cli/dist/envsync.js; then echo "internal package name leaked into bundle"; exit 1; fi
-          node apps/cli/dist/envsync.js scan tests/fixtures/next-pages-router --format json > /dev/null || test $? -eq 1
+          stage="$RUNNER_TEMP/envsync-stage"
+          node apps/cli/scripts/stage.mjs --out "$stage"
+          npm pack "$stage" --pack-destination "$RUNNER_TEMP" --ignore-scripts
+          tarball=$(ls "$RUNNER_TEMP"/envsync-*.tgz)
+          tar -tzf "$tarball" | sort > "$RUNNER_TEMP/contents.txt"
+          printf '%s\n' package/CHANGELOG.md package/LICENSE package/README.md package/dist/envsync.js package/package.json > "$RUNNER_TEMP/expected.txt"
+          diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/contents.txt"
+          # Code and manifest only: the CHANGELOG legitimately mentions the internal scope.
+          if tar -xzOf "$tarball" package/dist/envsync.js package/package.json | grep -q '@envsync-internal'; then echo "internal package name leaked into the package"; exit 1; fi
+          # Install the tarball like a user would, in a fresh project outside the checkout.
+          consumer="$RUNNER_TEMP/consumer"
+          mkdir "$consumer"
+          (cd "$consumer" && npm init --yes > /dev/null && npm install --ignore-scripts --no-audit --no-fund "$tarball")
+          (cd "$consumer" && npx --no-install envsync --version)
+          (cd "$consumer" && npx --no-install envsync scan "$GITHUB_WORKSPACE/tests/fixtures/next-pages-router" --format json > /dev/null) || test $? -eq 1
         shell: bash

@@ -1,6 +1,6 @@
 import type { DoctorCheck } from "@envsync-internal/core";
 import { JSON_SCHEMA_VERSION } from "./json.js";
-import { sanitizeForOutput } from "./sanitize.js";
+import { sanitizeForOutput, sanitizeJsonDocument } from "./sanitize.js";
 
 export type DoctorCounts = { pass: number; warn: number; fail: number; skip: number };
 
@@ -34,5 +34,5 @@ export function formatDoctorJson(checks: readonly DoctorCheck[], counts: DoctorC
       ...(check.suggestion !== undefined ? { suggestion: check.suggestion } : {}),
     })),
   };
-  return `${sanitizeForOutput(JSON.stringify(output, null, 2))}\n`;
+  return `${sanitizeJsonDocument(JSON.stringify(output, null, 2))}\n`;
 }

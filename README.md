@@ -66,7 +66,8 @@ The file is read as data, so only literal values are supported. See
 
 ## Development
 
-Requirements: Node.js 22.12+ and pnpm (pinned via `packageManager`; `corepack enable` on Node 22/24).
+Requirements: Node.js 22.12+ and pnpm 12.10.1, the version pinned in `packageManager`
+(`npm install --global pnpm@12.10.1`; the Corepack bundled with Node 22 cannot run pnpm 12).
 
 ```sh
 pnpm install

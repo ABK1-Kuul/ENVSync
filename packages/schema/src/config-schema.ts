@@ -55,7 +55,7 @@ export function parseConfigSource(sourceText: string, fileName = "envsync.config
   if (syntaxError) {
     issues.push({
       kind: "invalid",
-      message: `${fileName} has a syntax error: ${syntaxError.text}`,
+      message: `${fileName} has a syntax error (${syntaxError.text}).`,
       suggestion: "Fix the syntax error, then run the scan again.",
       ...(syntaxError.location ? { location: syntaxError.location } : {}),
     });
@@ -273,7 +273,9 @@ function firstSyntaxError(sourceText: string, fileName: string): { text: string;
   });
   const first = diagnostics.find((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
   if (!first) return undefined;
-  const text = ts.flattenDiagnosticMessageText(first.messageText, " ");
+  // Only the diagnostic code is reported: some TypeScript messages quote source text (for example
+  // TS1121 or TS1435), and messages must never echo the config's contents.
+  const text = `TS${first.code}`;
   if (first.file && first.start !== undefined) {
     const { line, character } = first.file.getLineAndCharacterOfPosition(first.start);
     return { text, location: { line: line + 1, column: character + 1 } };

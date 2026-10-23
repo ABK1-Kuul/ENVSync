@@ -49,12 +49,14 @@ Record significant decisions here. Keep entries short and dated.
 - Decision: `init` previews by default; `--write` is the explicit consent. The config is only ever created (never rewritten). `.env.example` is created, or gains an appended block of empty placeholders. Creates use exclusive mode; appends are refused if the file's SHA-256 changed since the preview; symlinks are refused (and `O_NOFOLLOW` is used where available).
 - Reason: Satisfies "preview first, never overwrite without consent" without an interactive prompt, so it works the same in terminals and scripts.
 - Consequence: Updating an existing config stays a manual edit; `scan` reports what to change.
+- Amended (2026-10-23, after security review): `--write` re-plans and applies in one run rather than replaying the earlier preview, and the docs say so. Appends go through one verified handle (same device and inode as the checked file, regular, single hard link, content hash unchanged), written at the verified end offset without `O_APPEND` so a failed write can be truncated back on every platform. Creates remove their own incomplete file on failure. Plans that would not stick (unterminated quote, unreadable append) or that come from a config with problems are blocked or skipped. Reads use the same verified-handle approach.
 
 ## ADR-009: `doctor` evaluates `.gitignore` itself instead of running git
 - Status: Accepted (2026-10-23)
 - Decision: `doctor` reads `.gitignore` files from the project up to the repository root and `.git/info/exclude`, and evaluates them with a small built-in matcher. It lists `.env*` file names but never opens them.
 - Reason: Running `git` would mean spawning processes, which the no-execution boundary forbids, and a repository can configure git to run hooks or helpers.
 - Consequence: The global excludes file and already-tracked files are not detected; this is documented.
+- Amended (2026-10-23, after security review): tracked files are now detected by parsing `.git/index` (names only; unknown → warning, never pass). The regex-based matcher was replaced by a linear-time port of git's wildmatch with git's line-splitting, trimming and `core.ignorecase` rules, verified by a differential test against `git check-ignore` (tests may run git; product code does not).
 
 ## ADR-010: ENV003 severity reflects analysis completeness
 - Status: Accepted (2026-10-23)
@@ -67,3 +69,4 @@ Record significant decisions here. Keep entries short and dated.
 - Decision: Publish only `envsync` (Apache-2.0) from `apps/cli`, bundled with esbuild into a single ESM file; `typescript` stays an external runtime dependency. Internal workspace packages are renamed from `@envsync/*` to `@envsync-internal/*`, remain `private`, and are never published.
 - Reason: The `@envsync` npm scope belongs to a third party, so internal names under it were a dependency-confusion risk. Bundling means no internal name ever needs to resolve from a registry.
 - Consequence: esbuild is a devDependency (install script denied). Registering the `@envsync-internal` scope on npm is recommended. Release steps are in docs/RELEASING.md.
+- Amended (2026-10-23, after code review): `apps/cli` is `private`; the package is staged outside the repository with an allow-listed manifest (no devDependencies/scripts), so no generated copies land in the source tree and internal names never appear in the published manifest.

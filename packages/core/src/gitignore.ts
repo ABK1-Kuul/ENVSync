@@ -1,15 +1,21 @@
 import { lstat } from "node:fs/promises";
 import path from "node:path";
+import { readTrackedPaths, type TrackedPaths } from "./git-index.js";
 import { readProjectFile, ScanError } from "./project-files.js";
+import { compileWildmatch, wildmatch, type CompiledPattern } from "./wildmatch.js";
 
 /**
- * Minimal, read-only `.gitignore` evaluation for `doctor`, so it never has to run `git`.
- * Supports comments, negation, anchoring, directory-only rules, `*`, `?`, `**` and character
- * classes, plus `.git/info/exclude`. Not supported (documented): the global excludes file and
- * whether a file is already tracked despite being ignored.
+ * Read-only `.gitignore` evaluation for `doctor`, so it never has to run git.
+ *
+ * Follows git's rules: lines split on LF (one trailing CR dropped), only unescaped trailing ASCII
+ * spaces trimmed, `#` comments, `!` negation, `\` escapes, trailing `/` for directories, patterns
+ * containing `/` anchored to their file's directory, wildmatch globbing (see wildmatch.ts),
+ * `core.ignorecase` from `.git/config`, `.git/info/exclude` at the lowest precedence, deeper
+ * `.gitignore` files over shallower ones, and no re-inclusion inside an ignored directory.
+ * Not covered (documented): the global excludes file (`core.excludesFile`).
  */
 
-type Rule = { negated: boolean; directoryOnly: boolean; anchored: boolean; regex: RegExp };
+type Rule = { negated: boolean; directoryOnly: boolean; anchored: boolean; pattern: CompiledPattern };
 
 /** Rules from one ignore file; they apply to paths inside `base`. */
 type RuleSet = { base: string; rules: Rule[] };
@@ -17,13 +23,25 @@ type RuleSet = { base: string; rules: Rule[] };
 export type IgnoreContext = {
   /** Absolute path of the repository root, or `null` if the project is not in a git repository. */
   repositoryRoot: string | null;
+  ignoreCase: boolean;
   /** Lowest precedence first: `.git/info/exclude`, then `.gitignore` files from outermost to innermost. */
   ruleSets: RuleSet[];
+  /** True when an ignore file exceeded the rule or pattern limits and some rules were skipped. */
+  truncated: boolean;
+  tracked: TrackedPaths;
+};
+
+export type IgnoreContextOptions = {
+  /** Directory above which the repository search stops (like GIT_CEILING_DIRECTORIES). */
+  ceiling?: string;
 };
 
 const MAX_PARENT_LEVELS = 64;
+export const MAX_RULES_PER_FILE = 10_000;
+export const MAX_PATTERN_LENGTH = 4_096;
 
-export async function loadIgnoreContext(projectRoot: string): Promise<IgnoreContext> {
+export async function loadIgnoreContext(projectRoot: string, options: IgnoreContextOptions = {}): Promise<IgnoreContext> {
+  const ceiling = options.ceiling === undefined ? undefined : path.resolve(options.ceiling);
   const chain: string[] = [];
   let repositoryRoot: string | null = null;
 
@@ -34,35 +52,58 @@ export async function loadIgnoreContext(projectRoot: string): Promise<IgnoreCont
       break;
     }
     const parent = path.dirname(directory);
-    if (parent === directory) break;
+    if (parent === directory || directory === ceiling) break;
     directory = parent;
   }
-  if (repositoryRoot === null) return { repositoryRoot, ruleSets: [] };
+  if (repositoryRoot === null) {
+    return { repositoryRoot, ignoreCase: false, ruleSets: [], truncated: false, tracked: { status: "ok", paths: new Set() } };
+  }
+
+  // `.git` may be a file (linked worktree, submodule); then config, exclude and index live elsewhere.
+  const gitDirectory = path.join(repositoryRoot, ".git");
+  const gitIsDirectory = await isDirectory(gitDirectory);
+  const config = gitIsDirectory ? parseGitConfig((await readOptional(gitDirectory, "config")) ?? "") : { ignoreCase: false, sha256: false };
 
   const ruleSets: RuleSet[] = [];
-  const excludeText = await readIgnoreFile(path.join(repositoryRoot, ".git", "info"), "exclude");
-  if (excludeText !== null) ruleSets.push({ base: repositoryRoot, rules: parseIgnoreRules(excludeText) });
-  for (const directory of chain.reverse()) {
-    const text = await readIgnoreFile(directory, ".gitignore");
-    if (text !== null) ruleSets.push({ base: directory, rules: parseIgnoreRules(text) });
-  }
-  return { repositoryRoot, ruleSets };
+  let truncated = false;
+  const addRules = (base: string, text: string | null) => {
+    if (text === null) return;
+    const parsed = parseIgnoreRules(text, config.ignoreCase);
+    truncated ||= parsed.truncated;
+    ruleSets.push({ base, rules: parsed.rules });
+  };
+  if (gitIsDirectory) addRules(repositoryRoot, await readOptional(path.join(gitDirectory, "info"), "exclude"));
+  for (const directory of chain.reverse()) addRules(directory, await readOptional(directory, ".gitignore"));
+
+  const tracked: TrackedPaths = gitIsDirectory
+    ? await readTrackedPaths(gitDirectory, config.sha256 ? 32 : 20)
+    : { status: "unavailable", reason: "this is a linked worktree or submodule, whose index was not read" };
+
+  return { repositoryRoot, ignoreCase: config.ignoreCase, ruleSets, truncated, tracked };
 }
 
-/** Whether `fileName`, directly inside `projectRoot`, would be ignored by git. */
+/** Whether `fileName`, directly inside `projectRoot`, would be ignored by git (if untracked). */
 export function isIgnoredFile(context: IgnoreContext, projectRoot: string, fileName: string): boolean {
   if (context.repositoryRoot === null) return false;
   const root = path.resolve(projectRoot);
 
   // Git does not look inside an ignored directory, so an ignored ancestor ignores the file.
-  const ancestors: string[] = [];
   for (let directory = root; directory !== context.repositoryRoot; directory = path.dirname(directory)) {
-    ancestors.unshift(directory);
+    if (decide(context, directory, true)) return true;
     if (path.dirname(directory) === directory) break;
   }
-  if (ancestors.some((directory) => decide(context, directory, true))) return true;
-
   return decide(context, path.join(root, fileName), false);
+}
+
+/** `true`/`false` when the index was read; `undefined` when tracking status is unknown. */
+export function isTrackedFile(context: IgnoreContext, projectRoot: string, fileName: string): boolean | undefined {
+  if (context.repositoryRoot === null) return false;
+  if (context.tracked.status !== "ok") return undefined;
+  const relative = path.relative(context.repositoryRoot, path.join(path.resolve(projectRoot), fileName)).split(path.sep).join("/");
+  if (!context.ignoreCase) return context.tracked.paths.has(relative);
+  const folded = relative.toLowerCase();
+  for (const tracked of context.tracked.paths) if (tracked.toLowerCase() === folded) return true;
+  return false;
 }
 
 /** The last matching rule wins across all applicable rulesets, in precedence order. */
@@ -75,74 +116,80 @@ function decide(context: IgnoreContext, target: string, isDirectory: boolean): b
     const baseName = relativePath.slice(relativePath.lastIndexOf("/") + 1);
     for (const rule of rules) {
       if (rule.directoryOnly && !isDirectory) continue;
-      if (rule.regex.test(rule.anchored ? relativePath : baseName)) ignored = !rule.negated;
+      if (wildmatch(rule.pattern, rule.anchored ? relativePath : baseName)) ignored = !rule.negated;
     }
   }
   return ignored;
 }
 
-export function parseIgnoreRules(text: string): Rule[] {
+export function parseIgnoreRules(text: string, ignoreCase = false): { rules: Rule[]; truncated: boolean } {
   const rules: Rule[] = [];
-  for (const rawLine of text.replace(/^﻿/, "").split(/\r\n|\n|\r/)) {
-    let line = rawLine.replace(/(?<!\\)\s+$/, "");
+  let truncated = false;
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text; // git skips a UTF-8 BOM
+
+  for (const rawLine of body.split("\n")) {
+    let line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    line = trimTrailingSpaces(line);
     if (line === "" || line.startsWith("#")) continue;
+    if (rules.length >= MAX_RULES_PER_FILE || line.length > MAX_PATTERN_LENGTH) {
+      truncated = true;
+      continue;
+    }
+
     let negated = false;
     if (line.startsWith("!")) {
       negated = true;
       line = line.slice(1);
-    } else if (line.startsWith("\\!") || line.startsWith("\\#")) {
-      line = line.slice(1);
     }
-    const directoryOnly = line.endsWith("/");
+    const directoryOnly = line.endsWith("/") && !line.endsWith("\\/");
     if (directoryOnly) line = line.slice(0, -1);
     const anchored = line.includes("/");
     if (line.startsWith("/")) line = line.slice(1);
     if (line === "") continue;
-    rules.push({ negated, directoryOnly, anchored, regex: new RegExp(`^${globToRegex(line)}$`) });
+    rules.push({ negated, directoryOnly, anchored, pattern: compileWildmatch(line, ignoreCase) });
   }
-  return rules;
+  return { rules, truncated };
 }
 
-function globToRegex(glob: string): string {
-  let out = "";
-  for (let i = 0; i < glob.length; i++) {
-    const char = glob[i] as string;
-    if (char === "*" && glob[i + 1] === "*") {
-      const atSegmentStart = i === 0 || glob[i - 1] === "/";
-      if (atSegmentStart && glob[i + 2] === "/") {
-        out += "(?:.*/)?";
-        i += 2;
-      } else {
-        out += ".*";
-        i += 1;
-      }
-    } else if (char === "*") {
-      out += "[^/]*";
-    } else if (char === "?") {
-      out += "[^/]";
-    } else if (char === "[") {
-      const end = glob.indexOf("]", i + 2);
-      if (end === -1) {
-        out += "\\[";
-      } else {
-        out += `[${glob.slice(i + 1, end).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
-        i = end;
-      }
-    } else if (char === "\\" && i + 1 < glob.length) {
-      out += escapeRegex(glob[i + 1] as string);
-      i += 1;
+/** Git trims trailing ASCII spaces only, and keeps a space escaped with a backslash. */
+function trimTrailingSpaces(line: string): string {
+  let trailingSpaceStart = -1;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === " ") {
+      if (trailingSpaceStart === -1) trailingSpaceStart = i;
     } else {
-      out += escapeRegex(char);
+      trailingSpaceStart = -1;
+      if (char === "\\") i++; // the escaped character, even a space, is kept
     }
   }
-  return out;
+  return trailingSpaceStart === -1 ? line : line.slice(0, trailingSpaceStart);
 }
 
-function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+/** Minimal `.git/config` reader for the two settings `doctor` needs. */
+export function parseGitConfig(text: string): { ignoreCase: boolean; sha256: boolean } {
+  let section = "";
+  let ignoreCase = false;
+  let sha256 = false;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    const header = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"[^"]*")?\s*\]/.exec(line);
+    if (header) {
+      section = (header[1] as string).toLowerCase();
+      continue;
+    }
+    const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+    if (!entry) continue;
+    const key = (entry[1] as string).toLowerCase();
+    const value = (entry[2] ?? "true").replace(/\s*[#;].*$/, "").trim().toLowerCase();
+    if (section === "core" && key === "ignorecase") ignoreCase = ["true", "yes", "on", "1"].includes(value);
+    if (section === "extensions" && key === "objectformat") sha256 = value === "sha256";
+  }
+  return { ignoreCase, sha256 };
 }
 
-async function readIgnoreFile(directory: string, fileName: string): Promise<string | null> {
+async function readOptional(directory: string, fileName: string): Promise<string | null> {
   try {
     return await readProjectFile(directory, fileName);
   } catch (error) {
@@ -155,6 +202,14 @@ async function exists(target: string): Promise<boolean> {
   try {
     await lstat(target);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return (await lstat(target)).isDirectory();
   } catch {
     return false;
   }

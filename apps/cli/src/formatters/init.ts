@@ -10,6 +10,10 @@ export function formatInitPlan(plan: InitPlan, written: readonly string[] | null
       lines.push(`Unchanged ${change.path}: ${change.reason}`, "");
       continue;
     }
+    if (change.action === "blocked") {
+      lines.push(`Cannot update ${change.path}: ${change.reason}`, "");
+      continue;
+    }
     const heading =
       change.action === "create"
         ? `Create ${change.path}:`
@@ -30,10 +34,20 @@ export function formatInitPlan(plan: InitPlan, written: readonly string[] | null
   if (plan.skippedNames.length > 0) {
     lines.push(`Note: ${plan.skippedNames.length} referenced name(s) are not valid variable names and were left out.`);
   }
+  for (const group of plan.caseCollisions) {
+    lines.push(`Note: ${group.join(" and ")} differ only by letter case; \`envsync scan\` reports this (ENV007) because they collide on Windows.`);
+  }
 
-  const pending = plan.changes.filter((change) => change.action !== "unchanged");
+  const blocked = plan.changes.some((change) => change.action === "blocked");
+  const pending = plan.changes.filter((change) => change.action === "create" || change.action === "append");
   if (written === null) {
-    lines.push(pending.length === 0 ? "Nothing to change." : "Run `envsync init --write` to apply these changes.");
+    lines.push(
+      blocked
+        ? "Fix the problem above, then run `envsync init` again. `--write` will refuse to change anything until then."
+        : pending.length === 0
+          ? "Nothing to change."
+          : "Run `envsync init --write` to apply these changes. Files are checked again when writing.",
+    );
   } else {
     lines.push(written.length === 0 ? "Nothing to change." : `Wrote ${written.join(", ")}. Review the files before committing.`);
   }

@@ -52,6 +52,7 @@ describe("renderEnvExampleAppend", () => {
     ["CRLF", "A=\r\n", "# Added by `envsync init`\r\nB=\r\n"],
     ["CRLF without trailing newline", "A=\r\nC=", "\r\n# Added by `envsync init`\r\nB=\r\n"],
     ["empty file", "", "# Added by `envsync init`\nB=\n"],
+    ["byte-order mark only (no blank line after it)", String.fromCharCode(0xfeff), "# Added by `envsync init`\nB=\n"],
   ])("%s", (_label, existing, expected) => {
     const appended = renderEnvExampleAppend(existing, ["B"]);
     expect(appended).toBe(expected);

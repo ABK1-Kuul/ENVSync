@@ -1,5 +1,5 @@
 import type { Diagnostic, ScanResult, SeverityCounts } from "@envsync-internal/core";
-import { sanitizeForOutput } from "./sanitize.js";
+import { sanitizeJsonDocument } from "./sanitize.js";
 
 /** Version of the JSON output contract. Bump only with a documented breaking change. */
 export const JSON_SCHEMA_VERSION = 1;
@@ -18,9 +18,9 @@ export function formatJson(result: ScanResult, counts: SeverityCounts, strict: b
     diagnostics: result.diagnostics.map(toJsonDiagnostic),
     skipped: result.skipped.map(({ path, reason }) => ({ path, reason })),
   };
-  // JSON.stringify escapes C0 controls but not DEL, C1 or bidi characters; escaping them keeps
-  // the document identical once parsed while making raw `cat` output safe.
-  return `${sanitizeForOutput(JSON.stringify(output, null, 2))}\n`;
+  // JSON.stringify escapes C0 controls but not DEL, C1, invisible or bidi characters; escaping them
+  // keeps the document identical once parsed while making raw `cat` output safe.
+  return `${sanitizeJsonDocument(JSON.stringify(output, null, 2))}\n`;
 }
 
 // Fixed key order and explicit fields keep the output stable even if the internal type grows.
