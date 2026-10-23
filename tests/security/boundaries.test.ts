@@ -46,6 +46,31 @@ describe("product source cannot execute project code or reach the network", asyn
     expect(offenders).toEqual([]);
   });
 
+  test("no invisible control, line-separator or bidi characters hide in product or test source", async () => {
+    const isHidden = (code: number) =>
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x200e ||
+      code === 0x200f ||
+      code === 0x2028 ||
+      code === 0x2029 ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069);
+    const testDirs = ["packages/core/test", "packages/schema/test", "packages/parser-next/test", "apps/cli/test", "tests"];
+    const testFiles = (await Promise.all(testDirs.map((dir) => listSourceFiles(path.join(REPO_ROOT, dir))))).flat();
+    const offenders: string[] = [];
+    for (const file of [...files, ...testFiles]) {
+      const text = await readFile(file, "utf8");
+      for (const char of text) {
+        if (isHidden(char.codePointAt(0) as number)) {
+          offenders.push(path.relative(REPO_ROOT, file));
+          break;
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   test("the only TypeScript compiler entry points used are parse-only", async () => {
     const used = new Set<string>();
     for (const file of files) {

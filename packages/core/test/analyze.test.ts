@@ -1,8 +1,8 @@
-import { parseConfigSource, parseEnvExample, type ParsedConfig, type VariableDefinition } from "@envsync/schema";
+import { parseConfigSource, parseEnvExample, type ParsedConfig, type VariableDefinition } from "@envsync-internal/schema";
 import { describe, expect, test } from "vitest";
 import { analyze, type AnalysisInput, type ExtractedReference } from "../src/index.js";
 
-const framework = { name: "Next.js", publicPrefix: "NEXT_PUBLIC_", builtInVariables: ["NODE_ENV"] };
+const framework = { name: "Next.js", publicPrefix: "NEXT_PUBLIC_", builtInVariables: ["NODE_ENV"], externallyReadVariables: ["PORT"] };
 
 function variable(name: string, overrides: Partial<Omit<VariableDefinition, "name">> = {}, line = 1): VariableDefinition {
   return { name, required: true, type: "string", location: { line, column: 5 }, ...overrides };
@@ -72,10 +72,11 @@ describe("analyze", () => {
     expect(noFile[0]?.message).toContain("was not found");
   });
 
-  test("ENV003: declared but unreferenced is a warning that mentions dynamic access when present", () => {
+  test("ENV003: a warning when analysis is complete, downgraded to info when dynamic access exists", () => {
     const quiet = analyze(input({ variables: [variable("UNUSED", { required: false })] }));
     expect(codes(quiet)).toEqual(["ENV003:warning:UNUSED"]);
-    expect(quiet[0]?.message).not.toContain("dynamic process.env access");
+    expect(quiet[0]?.message).not.toContain("dynamic process.env");
+    expect(quiet[0]?.suggestion).toContain("external: true");
 
     const withDynamic = analyze(
       input({
@@ -83,8 +84,36 @@ describe("analyze", () => {
         references: [{ file: "a.ts", references: [{ kind: "dynamic", line: 1, column: 1 }] }],
       }),
     );
-    expect(codes(withDynamic)).toEqual(["ENV006:info:-", "ENV003:warning:UNUSED"]);
-    expect(withDynamic[1]?.message).toContain("1 dynamic process.env access");
+    expect(codes(withDynamic)).toEqual(["ENV006:info:-", "ENV003:info:UNUSED"]);
+    expect(withDynamic[1]?.message).toContain("1 dynamic process.env access that may read it, so this is less certain");
+  });
+
+  test("ENV003 is not reported for `external: true` or for variables the framework reads itself", () => {
+    const result = analyze(
+      input({
+        variables: [variable("WEBHOOK_URL", { required: false, external: true }), variable("PORT", { required: false })],
+      }),
+    );
+    expect(result).toEqual([]);
+  });
+
+  test("ENV007 warning: names that differ only by case collide on Windows, in config and .env.example", () => {
+    const result = analyze(
+      input({
+        variables: [variable("API_URL", {}, 3), variable("api_url", {}, 4)],
+        example: "API_URL=\nApi_Url=\napi_url=\n",
+        references: [{ file: "a.ts", references: [ref("API_URL"), ref("api_url")] }],
+      }),
+    );
+    const collisions = result.filter((d) => d.code === "ENV007");
+    expect(collisions.map(({ severity, file, line, variableName }) => ({ severity, file, line, variableName }))).toEqual([
+      { severity: "warning", file: ".env.example", line: 2, variableName: "Api_Url" },
+      { severity: "warning", file: ".env.example", line: 3, variableName: "api_url" },
+      { severity: "warning", file: "envsync.config.ts", line: 4, variableName: "api_url" },
+    ]);
+    expect(collisions[2]?.message).toBe(
+      "api_url differs from API_URL (line 3 of envsync.config.ts) only by letter case. Windows treats environment variable names case-insensitively, so they collide there.",
+    );
   });
 
   test("ENV003 is not reported for a variable exposed through framework config", () => {

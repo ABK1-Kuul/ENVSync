@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { scanProject } from "@envsync/core";
-import { nextFramework } from "@envsync/parser-next";
+import { scanProject } from "@envsync-internal/core";
+import { nextFramework } from "@envsync-internal/parser-next";
 import { afterEach, describe, expect, test } from "vitest";
 import { copyFixture, type FixtureCopy } from "../helpers.js";
 
@@ -43,7 +43,8 @@ describe("fixture: next-pages-router (drift)", () => {
       { code: "ENV007", severity: "warning", file: ".env.example", line: 3, column: undefined, variableName: "NEXT_PUBLIC_API_URL" },
       { code: "ENV002", severity: "error", file: "envsync.config.ts", line: 4, column: 5, variableName: "STRIPE_KEY" },
       { code: "ENV005", severity: "error", file: "envsync.config.ts", line: 5, column: 5, variableName: "NEXT_PUBLIC_ADMIN_SECRET" },
-      { code: "ENV003", severity: "warning", file: "envsync.config.ts", line: 6, column: 5, variableName: "UNUSED_FLAG" },
+      // Info, not warning: the fixture has dynamic access, so "unused" cannot be certain.
+      { code: "ENV003", severity: "info", file: "envsync.config.ts", line: 6, column: 5, variableName: "UNUSED_FLAG" },
       { code: "ENV005", severity: "error", file: "next.config.js", line: 3, column: 5, variableName: "STRIPE_KEY" },
       { code: "ENV006", severity: "info", file: "pages/api/data.ts", line: 3, column: 17, variableName: undefined },
       { code: "ENV001", severity: "error", file: "pages/api/data.ts", line: 5, column: 17, variableName: "MISSING_IN_CONFIG" },

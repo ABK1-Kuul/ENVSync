@@ -43,3 +43,27 @@ Record significant decisions here. Keep entries short and dated.
 - Decision: Exit 0 = clean, 1 = errors (or warnings with `--strict`), 2 = usage error or the scan could not run. JSON output carries `schemaVersion: 1`. Fixture `.env.example` content is stored as `env.example.fixture` and materialized in a temp copy at test time.
 - Reason: CI needs to tell "findings" apart from "could not scan". Keeping dotenv files out of git and out of agent-blocked paths keeps fixtures maintainable without weakening the `.env*` deny rules.
 - Consequence: Changing exit codes or the JSON shape requires a schema version bump and release notes (ADR-003).
+
+## ADR-008: `init` writes only by exclusive create or verified append
+- Status: Accepted (2026-10-23)
+- Decision: `init` previews by default; `--write` is the explicit consent. The config is only ever created (never rewritten). `.env.example` is created, or gains an appended block of empty placeholders. Creates use exclusive mode; appends are refused if the file's SHA-256 changed since the preview; symlinks are refused (and `O_NOFOLLOW` is used where available).
+- Reason: Satisfies "preview first, never overwrite without consent" without an interactive prompt, so it works the same in terminals and scripts.
+- Consequence: Updating an existing config stays a manual edit; `scan` reports what to change.
+
+## ADR-009: `doctor` evaluates `.gitignore` itself instead of running git
+- Status: Accepted (2026-10-23)
+- Decision: `doctor` reads `.gitignore` files from the project up to the repository root and `.git/info/exclude`, and evaluates them with a small built-in matcher. It lists `.env*` file names but never opens them.
+- Reason: Running `git` would mean spawning processes, which the no-execution boundary forbids, and a repository can configure git to run hooks or helpers.
+- Consequence: The global excludes file and already-tracked files are not detected; this is documented.
+
+## ADR-010: ENV003 severity reflects analysis completeness
+- Status: Accepted (2026-10-23)
+- Decision: ENV003 is a warning when the scan saw no dynamic `process.env` access and info otherwise. Variables marked `external: true` or read by the framework itself are never reported.
+- Reason: "Unused" cannot be known when dynamic access exists; `--strict` should not fail on a guess.
+- Consequence: Severity of an existing code depends on context; documented in docs/CLI.md.
+
+## ADR-011: Publish one bundled `envsync` package; internal packages use `@envsync-internal/*`
+- Status: Accepted (2026-10-23)
+- Decision: Publish only `envsync` (Apache-2.0) from `apps/cli`, bundled with esbuild into a single ESM file; `typescript` stays an external runtime dependency. Internal workspace packages are renamed from `@envsync/*` to `@envsync-internal/*`, remain `private`, and are never published.
+- Reason: The `@envsync` npm scope belongs to a third party, so internal names under it were a dependency-confusion risk. Bundling means no internal name ever needs to resolve from a registry.
+- Consequence: esbuild is a devDependency (install script denied). Registering the `@envsync-internal` scope on npm is recommended. Release steps are in docs/RELEASING.md.

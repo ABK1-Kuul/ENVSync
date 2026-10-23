@@ -1,0 +1,12 @@
+{
+  "name": "fixture-next-app-router",
+  "private": true,
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('ENVSYNC_SCRIPT_WAS_RUN', 'x')\"",
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "next": "15.0.0",
+    "react": "19.0.0"
+  }
+}

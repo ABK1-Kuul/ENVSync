@@ -1,4 +1,4 @@
-import type { Diagnostic, ScanResult, SeverityCounts } from "@envsync/core";
+import type { Diagnostic, ScanResult, SeverityCounts } from "@envsync-internal/core";
 import { sanitizeForOutput } from "./sanitize.js";
 
 /** Version of the JSON output contract. Bump only with a documented breaking change. */

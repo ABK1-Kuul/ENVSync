@@ -19,6 +19,8 @@ export type VariableDefinition = {
   required: boolean;
   /** `undefined` when the config does not say; consumers must not assume either way. */
   secret?: boolean;
+  /** True when the variable is read outside the scanned source (framework, dependency, platform). */
+  external?: boolean;
   /** Defaults to "string". */
   type: VariableType;
   description?: string;
@@ -38,7 +40,7 @@ export type ParsedConfig = {
   issues: ConfigIssue[];
 };
 
-const DEFINITION_FIELDS = ["required", "secret", "type", "description"] as const;
+const DEFINITION_FIELDS = ["required", "secret", "external", "type", "description"] as const;
 type DefinitionField = (typeof DEFINITION_FIELDS)[number];
 
 const SUPPORTED_SHAPE =
@@ -228,7 +230,8 @@ function parseDefinition(
     const fieldValue = unwrapExpression(property.initializer);
     switch (field) {
       case "required":
-      case "secret": {
+      case "secret":
+      case "external": {
         const literal = booleanLiteral(fieldValue);
         if (literal === undefined) {
           invalid(fieldValue, `\`${field}\` for ${name} must be the literal \`true\` or \`false\`.`, "Replace the expression with a boolean literal.");

@@ -23,9 +23,24 @@ describe("argument handling", () => {
     expect(await runCli(["--version"], process.cwd())).toEqual({ exitCode: 0, stdout: `${VERSION}\n`, stderr: "" });
   });
 
+  test("VERSION and the minimum Node.js version match the published package.json", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      name: string;
+      version: string;
+      engines: { node: string };
+    };
+    const { MINIMUM_NODE_VERSION } = await import("../src/main.js");
+    expect(manifest.name).toBe("envsync");
+    expect(manifest.version).toBe(VERSION);
+    expect(manifest.engines.node).toBe(`>=${MINIMUM_NODE_VERSION}`);
+  });
+
   test.each([
     [["deploy"], "Unknown command `deploy`"],
-    [["init"], "`init` is planned but not available yet"],
+    [["scan", "--write"], "`--write` is not an option of `scan`"],
+    [["init", "--format", "json"], "`--format` is not an option of `init`"],
+    [["doctor", "--strict"], "`--strict` is not an option of `doctor`"],
     [["scan", "--format", "xml"], "Unknown format `xml`"],
     [["scan", "--bogus"], "--bogus"],
     [["scan", "a", "b"], "at most one directory"],
@@ -89,8 +104,9 @@ describe("formatters", () => {
       (d) => `${d.code} ${d.severity}${d.file ? ` ${d.file}${d.line ? `:${d.line}${d.column ? `:${d.column}` : ""}` : ""}` : ""}`,
     );
     expect(terminalHeadlines.map((line) => line.split(" - ")[0])).toEqual(jsonHeadlines);
+    const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
     expect(terminal.stdout).toContain(
-      `Found ${parsed.summary.errors} errors, ${parsed.summary.warnings} warnings and ${parsed.summary.infos} info in`,
+      `Found ${plural(parsed.summary.errors, "error")}, ${plural(parsed.summary.warnings, "warning")} and ${parsed.summary.infos} info in`,
     );
   });
 

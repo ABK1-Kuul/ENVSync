@@ -1,5 +1,5 @@
 /**
- * Contract between the framework-agnostic core and a framework parser (e.g. `@envsync/parser-next`).
+ * Contract between the framework-agnostic core and a framework parser (e.g. `@envsync-internal/parser-next`).
  * Core never imports a parser; the CLI passes one in.
  */
 
@@ -16,6 +16,10 @@ export type FrameworkAdapter = {
   readonly publicPrefix: string;
   /** Variables provided by the runtime/framework that projects need not declare. */
   readonly builtInVariables: readonly string[];
+  /** Variables the framework or runtime reads itself; declaring them never triggers ENV003. */
+  readonly externallyReadVariables: readonly string[];
+  /** npm package that identifies the framework in package.json (used by `doctor`). */
+  readonly packageName: string;
   /** Root-relative paths of framework config files that may expose variables to the client. */
   readonly frameworkConfigFiles: readonly string[];
   extractReferences(sourceText: string, fileName: string): ExtractedReference[];

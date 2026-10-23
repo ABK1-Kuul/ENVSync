@@ -1,7 +1,6 @@
 # EnvSync CLI reference (unreleased, v0.0.0)
 
-This documents what is implemented today. Anything not listed here (for example `init` and
-`doctor`) is not available yet.
+This documents what is implemented today: `scan`, `init` and `doctor`.
 
 ## Running from this repository
 
@@ -37,13 +36,64 @@ Skipped during discovery: `.git`, `node_modules`, `.next`, `dist`, `build`, `out
 (at any depth, case-insensitive). Symlinks, unreadable directories, files over 1,000,000 bytes and
 files the parser cannot handle are listed under "Not scanned" / `skipped`.
 
+## `envsync init`
+
+```
+envsync init [directory] [--write]
+```
+
+Previews a starter `envsync.config.ts` and `.env.example`. **Nothing is written without `--write`.**
+
+| Situation | What `init` plans |
+|---|---|
+| No `envsync.config.ts` | Create it, declaring every statically referenced name (sorted, `required: true`, with a comment showing where each was first referenced). `NODE_ENV`/`NEXT_RUNTIME` are left out. |
+| `envsync.config.ts` exists | Leave it untouched. It is never rewritten; edit it by hand. |
+| No `.env.example` | Create it with an empty `NAME=` placeholder for every declared variable. |
+| `.env.example` exists | Append a `# Added by envsync init` block with placeholders for declared variables it does not list. Existing lines are kept byte-for-byte, and CRLF line endings are preserved. |
+
+Safety guarantees:
+- Generated files contain only variable names, comments and empty placeholders. `.env`/`.env.*`
+  files are never read, so no local value can be copied. The preview never shows the existing
+  contents of any file.
+- New files are created exclusively: if a file appeared between the preview and `--write`, it is
+  left untouched and `init` exits with code 2. An append is refused if `.env.example` changed
+  since the preview (compared by SHA-256). Symlinked targets are refused.
+- Running `init --write` again is a no-op ("Nothing to change").
+- Dynamic `process.env` accesses and names that are not valid variable names are reported, not
+  guessed.
+
+## `envsync doctor`
+
+```
+envsync doctor [directory] [--format terminal|json]
+```
+
+Read-only checks of the local setup. It never runs package scripts, never runs `git`, and never
+reads the contents of `.env`/`.env.*` files (it lists their names only).
+
+| Check id | Fails when | Warns when |
+|---|---|---|
+| `node-version` | Node.js is older than 22.12.0 | |
+| `source-files` | the directory is missing or not a directory | no source files are found |
+| `package-json` | `package.json` is invalid JSON, symlinked or oversized | it is missing |
+| `framework` | | `next` is not a dependency (with a monorepo hint at workspace roots); version ranges are never printed |
+| `config` | `envsync.config.ts` is missing or has problems | |
+| `env-example` | `.env.example` is symlinked or oversized | it is missing, or has lines that are not `KEY=value` (reported by line number only) |
+| `env-files-ignored` | a `.env*.local` file exists and is not ignored by git | a shared `.env`/`.env.<mode>` file is not ignored, or `.env.local` would not be ignored if created |
+
+`env-files-ignored` reports `skip` outside a git repository. Ignore rules are evaluated from
+`.gitignore` files between the project and the repository root plus `.git/info/exclude`; the
+global excludes file and already-tracked files are not checked.
+
+JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "skip", "exitCode" }, "checks": [{ "id", "status", "message", "suggestion"? }] }`.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | No errors. With `--strict`, also no warnings. Info never affects the exit code. |
-| `1` | At least one error, or (with `--strict`) at least one warning. |
-| `2` | Usage error, or the scan could not run: missing or unreadable project directory, missing `envsync.config.ts`, a config or `.env.example` that is a symlink / not a regular file / over 1 MB. The reason is printed to stderr; stdout is empty. |
+| `0` | `scan`: no errors (with `--strict`, also no warnings; info never counts). `init`: preview shown or changes written. `doctor`: no failed checks. |
+| `1` | `scan`: at least one error, or (with `--strict`) at least one warning. `doctor`: at least one failed check. |
+| `2` | Usage error (including an option that does not belong to the command), or the command could not run: missing or unreadable project directory, missing `envsync.config.ts` for `scan`, a config or `.env.example` that is a symlink / not a regular file / over 1 MB, or a file that changed between the `init` preview and `--write`. The reason is printed to stderr. |
 
 ## Config file: `envsync.config.ts`
 
@@ -70,6 +120,7 @@ export default defineConfig({
 |---|---|---|---|
 | `required` | `true` / `false` | `true` | ENV002 |
 | `secret` | `true` / `false` | unspecified | ENV005 |
+| `external` | `true` / `false` | `false` | `true` suppresses ENV003 for variables read outside the scanned source (hosting platform, dependency, tooling) |
 | `type` | `"string"`, `"number"`, `"boolean"`, `"url"` | `"string"` | validated only (reserved for `init`) |
 | `description` | string literal | none | validated only |
 
@@ -92,17 +143,20 @@ or tagged templates.
 |---|---|---|
 | ENV001 | error | A static `process.env` reference names a variable not declared in the config. Reported once per name, at the first location, with a count of other locations. `NODE_ENV` and `NEXT_RUNTIME` are treated as framework-provided. |
 | ENV002 | error | A `required` variable has no entry in `.env.example`, or `.env.example` does not exist. |
-| ENV003 | warning | A declared variable has no static reference and is not listed in `next.config` `env`. It may still be read by Next.js, a dependency or dynamic access. |
+| ENV003 | warning | A declared variable has no static reference, is not listed in `next.config` `env`, is not `external: true`, and is not one Next.js/Node.js reads itself (`PORT`, `HOSTNAME`, `NODE_OPTIONS`, `NEXT_TELEMETRY_DISABLED`, `NEXT_SHARP_PATH`, `TZ`). |
+| ENV003 | info | The same, but the project has dynamic `process.env` access (ENV006), so the variable may be read there and the finding is less certain. Info never fails `--strict`. |
 | ENV004 | error | Invalid or unsupported config content, including syntax errors. |
 | ENV005 | error | **Confirmed contract violation:** a variable declared `secret: true` has the `NEXT_PUBLIC_` prefix, or is listed under `env` in `next.config.*`. |
 | ENV005 | warning | **Name-based heuristic, not a confirmed leak:** a client-visible variable (public prefix or `next.config` `env`) has a name segment of `SECRET`, `PASSWORD`, `PASSWD`, `PRIVATE`, `TOKEN` or `CREDENTIALS` (whole `_`-separated segments, after the prefix), and is not declared `secret: false`. The message starts with "Possible exposure:" and names the matched segment. Values are never inspected. |
 | ENV006 | info | `process.env` used in a way whose variable name cannot be known statically. |
 | ENV007 | error | The same variable declared more than once in the config (identifier, quoted and computed-literal spellings count as the same name), or a repeated `variables` key. Each repeat is reported at its own location and refers to the first; the first declaration is used. |
 | ENV007 | warning | The same name appears more than once in `.env.example` (with or without `export`). Each repeat refers to the first line. |
+| ENV007 | warning | Two names in the config, or in `.env.example`, differ only by letter case (`API_URL` / `api_url`). They are distinct on Linux and macOS but collide on Windows. |
 
 Severity is part of the meaning: for ENV005, automation should treat `error` as a confirmed
 violation of the declared contract and `warning` as a heuristic. Duplicate detection runs on the
-AST / file lines in source order, before entries are merged, and names are case-sensitive.
+AST / file lines in source order, before entries are merged. Exact duplicates are case-sensitive;
+case-only differences are reported separately as above.
 
 Recognized static access: `process.env.NAME`, `process.env["NAME"]` (also `'NAME'` and
 `` `NAME` ``), optional chaining, `!`/`as`/parentheses, `const { NAME, OTHER: alias, X = "d" } = process.env`,
@@ -145,7 +199,10 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 - Only the project root's `envsync.config.ts`, `.env.example` and `next.config.*` are read; monorepo
   sub-apps must be scanned individually.
 - A local variable named `process` that shadows the global is not detected.
-- `.env.example` entries that are not declared in the config are not reported yet.
-- Malformed `.env.example` lines are ignored (they are parsed but not yet reported).
+- `.env.example` entries that are not declared in the config are not reported by `scan` yet
+  (this would need a new diagnostic code).
+- Malformed `.env.example` lines are ignored by `scan`; `doctor` reports them by line number.
 - `type` and `description` are validated but not yet used.
+- The example config imports `defineConfig` from `envsync`; until a package is published, omit
+  the import and export the object directly (as `envsync init` generates).
 - Linting is not configured in this repository yet.

@@ -9,6 +9,14 @@ export {
   SOURCE_EXTENSIONS,
 } from "./discovery.js";
 export type { DiscoveryErrorCode, DiscoveryResult, SkippedEntry } from "./discovery.js";
+export { runDoctor } from "./doctor.js";
+export type { DoctorCheck, DoctorStatus } from "./doctor.js";
 export type { ClientExposedName, ExtractedReference, FrameworkAdapter, Location } from "./framework.js";
-export { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, MAX_FILE_BYTES, scanProject, ScanError } from "./scan.js";
-export type { ScanErrorCode, ScanOptions, ScanResult, SkippedPath } from "./scan.js";
+export { isIgnoredFile, loadIgnoreContext, parseIgnoreRules } from "./gitignore.js";
+export type { IgnoreContext } from "./gitignore.js";
+export { applyInitPlan, InitError, planInit } from "./init.js";
+export type { FileChange, InitErrorCode, InitPlan } from "./init.js";
+export { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, MAX_FILE_BYTES, ScanError } from "./project-files.js";
+export type { ScanErrorCode, SkippedPath } from "./project-files.js";
+export { scanProject } from "./scan.js";
+export type { ScanOptions, ScanResult } from "./scan.js";

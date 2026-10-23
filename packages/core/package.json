@@ -1,7 +1,8 @@
 {
-  "name": "@envsync/core",
+  "name": "@envsync-internal/core",
   "version": "0.0.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
@@ -11,6 +12,6 @@
     }
   },
   "dependencies": {
-    "@envsync/schema": "workspace:*"
+    "@envsync-internal/schema": "workspace:*"
   }
 }

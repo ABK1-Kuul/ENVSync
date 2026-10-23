@@ -11,11 +11,11 @@
 - [x] Document limitations (docs/CLI.md) and run quality gates. (Lint still pending.)
 
 ## Sprint 2 — Safe setup and CI
-- [ ] `envsync init` preview and safe placeholder generation.
-- [ ] `envsync doctor` without arbitrary script execution.
-- [ ] GitHub Actions example with least-privilege permissions.
-- [ ] Improve unused-variable confidence and duplicate detection.
-- [ ] Package metadata, README, changelog and npm publish dry run.
+- [x] `envsync init` preview and safe placeholder generation.
+- [x] `envsync doctor` without arbitrary script execution.
+- [x] GitHub Actions example with least-privilege permissions (repo CI + docs/CI.md). Not yet run on GitHub.
+- [x] Improve unused-variable confidence and duplicate detection.
+- [x] Package metadata, README, changelog and npm publish dry run (`envsync`, Apache-2.0, bundled; tarball installed and exercised locally, not published).
 
 ## Later, based on user feedback
 - VS Code extension.

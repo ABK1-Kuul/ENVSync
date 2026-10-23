@@ -1,13 +1,49 @@
 {
-  "name": "@envsync/cli",
+  "name": "envsync",
   "version": "0.0.0",
-  "private": true,
+  "description": "Local-first checks that keep a Next.js project's environment variables, envsync.config.ts and .env.example in sync, without reading or printing secret values.",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "envsync": "./dist/bin.js"
+    "envsync": "./dist/envsync.js"
+  },
+  "files": [
+    "dist/envsync.js",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "keywords": [
+    "env",
+    "environment-variables",
+    "dotenv",
+    "nextjs",
+    "configuration",
+    "cli",
+    "static-analysis"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ABK1-Kuul/ENVSync.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/ABK1-Kuul/ENVSync#readme",
+  "bugs": {
+    "url": "https://github.com/ABK1-Kuul/ENVSync/issues"
+  },
+  "scripts": {
+    "bundle": "node scripts/bundle.mjs",
+    "prepack": "node scripts/bundle.mjs"
   },
   "dependencies": {
-    "@envsync/core": "workspace:*",
-    "@envsync/parser-next": "workspace:*"
+    "typescript": "6.0.3"
+  },
+  "devDependencies": {
+    "@envsync-internal/core": "workspace:*",
+    "@envsync-internal/parser-next": "workspace:*",
+    "esbuild": "0.28.2"
   }
 }
