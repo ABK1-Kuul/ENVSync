@@ -1,4 +1,4 @@
-import type { SeverityCounts } from "@envsync/core";
+import type { SeverityCounts } from "@envsync-internal/core";
 
 /** Documented in docs/CLI.md. Changing these is a breaking change for CI users. */
 export const EXIT_OK = 0;

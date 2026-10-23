@@ -17,3 +17,16 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+
+#Agent building kit 
+AGENTS.md
+ARCHITECTURE.md
+CLAUDE.md
+DESIGN.md
+PRODUCT.md
+SECURITY.md
+PROMPTS.md
+ROADMAP.md
+CLAUDE.md
+CLAUDE-KIT.md
+

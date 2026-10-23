@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["22", "24"]
+        include:
+          # The minimum version declared in package.json "engines".
+          - os: ubuntu-latest
+            node: "22.12.0"
+    steps:
+      # Actions are pinned to full commit SHAs; the comment records the release tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Corepack ships with Node.js 22 and 24 and installs the pnpm version pinned in
+      # package.json "packageManager", so no third-party pnpm action is needed.
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      # Runs the real binary through Node's package resolution (not Vitest's aliases). The drift
+      # fixture must report findings: exit 1 is the expected result, while 0 or 2 fail the step.
+      - name: Smoke-test the built CLI
+        run: node apps/cli/dist/bin.js scan tests/fixtures/next-pages-router --format json > /dev/null || test $? -eq 1
+        shell: bash
+
+      # The publishable artifact: one bundled file whose only non-builtin import is typescript.
+      - name: Bundle and check the publishable CLI
+        run: |
+          pnpm bundle
+          node apps/cli/dist/envsync.js --version
+          if grep -q '@envsync-internal' apps/cli/dist/envsync.js; then echo "internal package name leaked into bundle"; exit 1; fi
+          node apps/cli/dist/envsync.js scan tests/fixtures/next-pages-router --format json > /dev/null || test $? -eq 1
+        shell: bash

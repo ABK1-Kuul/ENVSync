@@ -6,8 +6,8 @@ import { scanProject, ScanError, type FrameworkAdapter } from "../src/index.js";
 
 const parserControl = vi.hoisted(() => ({ throwOnParse: false }));
 
-vi.mock("@envsync/schema", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@envsync/schema")>();
+vi.mock("@envsync-internal/schema", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@envsync-internal/schema")>();
   return {
     ...actual,
     parseConfigSource: (...args: Parameters<typeof actual.parseConfigSource>) => {
@@ -21,6 +21,8 @@ const framework: FrameworkAdapter = {
   name: "Test",
   publicPrefix: "PUBLIC_",
   builtInVariables: [],
+  externallyReadVariables: [],
+  packageName: "test-framework",
   frameworkConfigFiles: [],
   extractReferences: (text) => (text.includes("THROW") ? (() => { throw new RangeError("boom"); })() : []),
   extractClientExposedNames: () => [],

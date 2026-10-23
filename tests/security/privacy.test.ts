@@ -86,14 +86,14 @@ describe("secret values never appear in output", () => {
 describe("repository-controlled text cannot manipulate the terminal", () => {
   test("control characters and bidi overrides in names are escaped in both formats", async () => {
     fixture = await copyFixture("next-app-router");
-    const hostileName = "\u001b[2J\u001b[31mEVIL\u009b‮NAME\u007f";
+    const hostileName = "\u001b[2J\u001b[31mEVIL\u009b\u202eNAME\u007f";
     await writeFile(path.join(fixture.root, "lib", "hostile.ts"), `export const x = process.env[${JSON.stringify(hostileName)}];`);
 
     const terminal = await runCli(["scan"], fixture.root);
     const json = await runCli(["scan", "--format", "json"], fixture.root);
 
     for (const output of [terminal.stdout, json.stdout]) {
-      expect(output).not.toMatch(/[\u001b\u007f-\u009f‮]/);
+      expect(output).not.toMatch(/[\u001b\u007f-\u009f\u202e]/);
       expect(output).toContain("EVIL");
     }
     expect(terminal.stdout).toContain("\\u001b[2J");

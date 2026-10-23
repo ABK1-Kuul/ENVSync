@@ -1,4 +1,4 @@
-import type { ParsedConfig, ParsedEnvExample, VariableDefinition } from "@envsync/schema";
+import type { ParsedConfig, ParsedEnvExample, VariableDefinition } from "@envsync-internal/schema";
 import { compareDiagnostics, type Diagnostic } from "./diagnostics.js";
 import type { ClientExposedName, ExtractedReference, FrameworkAdapter } from "./framework.js";
 
@@ -14,7 +14,7 @@ export type AnalysisInput = {
   envExample: ParsedEnvExample | null;
   references: readonly FileReferences[];
   exposures: readonly FileExposures[];
-  framework: Pick<FrameworkAdapter, "name" | "publicPrefix" | "builtInVariables">;
+  framework: Pick<FrameworkAdapter, "name" | "publicPrefix" | "builtInVariables" | "externallyReadVariables">;
 };
 
 // Name segments that suggest a value must stay private. "KEY" is deliberately absent:
@@ -46,6 +46,13 @@ export function analyze(input: AnalysisInput): Diagnostic[] {
       ...(issue.variableName !== undefined ? { variableName: issue.variableName } : {}),
       suggestion: issue.suggestion,
     });
+  }
+
+  for (const collision of caseCollisions(config.variables.map(({ name, location }) => ({ name, line: location.line, column: location.column })))) {
+    diagnostics.push(caseCollisionDiagnostic(collision, configFile));
+  }
+  for (const collision of caseCollisions(envExample?.entries ?? [])) {
+    diagnostics.push(caseCollisionDiagnostic(collision, envExampleFile));
   }
 
   for (const duplicate of envExample?.duplicates ?? []) {
@@ -91,6 +98,7 @@ export function analyze(input: AnalysisInput): Diagnostic[] {
   }
 
   const builtIns = new Set(framework.builtInVariables);
+  const externallyRead = new Set(framework.externallyReadVariables);
   for (const [name, occurrences] of staticOccurrences) {
     if (declared.has(name) || builtIns.has(name)) continue;
     const first = occurrences[0] as Occurrence;
@@ -122,16 +130,21 @@ export function analyze(input: AnalysisInput): Diagnostic[] {
       });
     }
 
-    if (!staticOccurrences.has(definition.name) && !exposedNames.has(definition.name)) {
+    const usedElsewhere = definition.external === true || externallyRead.has(definition.name);
+    if (!usedElsewhere && !staticOccurrences.has(definition.name) && !exposedNames.has(definition.name)) {
+      // With dynamic access present the analysis is incomplete, so "unused" drops to info.
       diagnostics.push({
         code: "ENV003",
-        severity: "warning",
+        severity: dynamicCount > 0 ? "info" : "warning",
         message:
           `${definition.name} is declared but no static reference to it was found. It may be unused, ` +
-          `or read by ${framework.name}, a dependency, or dynamic access.` +
-          (dynamicCount > 0 ? ` The project has ${dynamicCount} dynamic process.env ${dynamicCount === 1 ? "access" : "accesses"}.` : ""),
+          `or read by ${framework.name}, a dependency, or the hosting platform.` +
+          (dynamicCount > 0
+            ? ` The project also has ${dynamicCount} dynamic process.env ${dynamicCount === 1 ? "access" : "accesses"} that may read it, so this is less certain.`
+            : ""),
         ...atDeclaration(definition),
-        suggestion: "Remove the declaration if it is no longer used; otherwise keep it.",
+        suggestion:
+          "Remove the declaration if it is no longer used. If something outside the scanned source reads it, add `external: true`.",
       });
     }
   }
@@ -219,6 +232,35 @@ function secretLookingSegment(name: string, prefix: string): string | undefined 
     .split("_")
     .map((segment) => segment.toUpperCase())
     .find((segment) => SECRET_NAME_SEGMENTS.has(segment));
+}
+
+type NamedLocation = { name: string; line: number; column?: number };
+type CaseCollision = { entry: NamedLocation; first: NamedLocation };
+
+/** Later entries whose name equals an earlier, differently spelled one when case is ignored. */
+function caseCollisions(entries: readonly NamedLocation[]): CaseCollision[] {
+  const firstByFoldedName = new Map<string, NamedLocation>();
+  const collisions: CaseCollision[] = [];
+  for (const entry of entries) {
+    const folded = entry.name.toUpperCase();
+    const first = firstByFoldedName.get(folded);
+    if (first === undefined) firstByFoldedName.set(folded, entry);
+    else if (first.name !== entry.name) collisions.push({ entry, first });
+  }
+  return collisions;
+}
+
+function caseCollisionDiagnostic({ entry, first }: CaseCollision, file: string): Diagnostic {
+  return {
+    code: "ENV007",
+    severity: "warning",
+    message: `${entry.name} differs from ${first.name} (line ${first.line} of ${file}) only by letter case. Windows treats environment variable names case-insensitively, so they collide there.`,
+    file,
+    line: entry.line,
+    ...(entry.column !== undefined ? { column: entry.column } : {}),
+    variableName: entry.name,
+    suggestion: "Use a single spelling for this variable.",
+  };
 }
 
 function compare(a: string, b: string): number {
