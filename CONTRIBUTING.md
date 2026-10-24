@@ -1,7 +1,7 @@
 # Contributing
 
 ## Before changing code
-Read `CLAUDE.md`, `ARCHITECTURE.md`, and `SECURITY.md`. Keep pull requests focused.
+Read `SECURITY.md`. Keep pull requests focused.
 
 ## Expected checks
 Run the repository's actual scripts, for example:

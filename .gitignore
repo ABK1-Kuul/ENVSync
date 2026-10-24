@@ -18,15 +18,16 @@ coverage/
 .DS_Store
 Thumbs.db
 
-#Agent building kit 
+# Agent instructions, design specs and planning
+.claude/
 AGENTS.md
 ARCHITECTURE.md
 CLAUDE.md
 DESIGN.md
 PRODUCT.md
-SECURITY.md
 PROMPTS.md
 ROADMAP.md
-CLAUDE.md
-CLAUDE-KIT.md
+docs/CLAUDE-KIT.md
+docs/DECISIONS.md
+docs/DEFINITION-OF-DONE.md
 

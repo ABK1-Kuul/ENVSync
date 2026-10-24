@@ -7,7 +7,7 @@ variables your source code reads with an explicit contract (`envsync.config.ts`)
 `.env.example`, and reports precise, actionable diagnostics, without ever reading or printing
 secret values.
 
-> Status: pre-release (`0.0.0`), not yet published to npm. See [ROADMAP.md](ROADMAP.md).
+> Status: pre-release (`0.0.0`), not yet published to npm.
 
 ## What it does
 
@@ -85,6 +85,4 @@ node apps/cli/dist/bin.js scan path/to/next-app
 | `apps/cli` | Argument parsing, formatters, exit codes |
 | `tests` | Fixture projects, integration and security tests |
 
-Contributor guidance: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
-[docs/DECISIONS.md](docs/DECISIONS.md). The Claude Code project kit is described in
-[docs/CLAUDE-KIT.md](docs/CLAUDE-KIT.md).
+Contributor guidance: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md).
