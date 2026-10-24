@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Everything is served from this origin: no third-party scripts, fonts, trackers or requests. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>EnvSync — every process.env, accounted for</title>
+  <meta name="description" content="EnvSync is a local-first CLI for Next.js + TypeScript that checks the environment variables your code reads against an explicit contract and .env.example, without ever reading or printing secret values.">
+  <meta name="theme-color" content="#0b0d0c">
+  <meta property="og:title" content="EnvSync — every process.env, accounted for">
+  <meta property="og:description" content="Local-first config drift detection for Next.js + TypeScript. Precise diagnostics with file and line. Never reads your secrets.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav">
+    <a class="brand" href="#top" aria-label="EnvSync home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect class="mark-bar mark-top-l" x="4" y="10" width="10" height="4" rx="2"/>
+        <rect class="mark-bar mark-top-r" x="18" y="10" width="10" height="4" rx="2"/>
+        <rect class="mark-bar mark-bottom" x="4" y="18" width="24" height="4" rx="2"/>
+      </svg>
+      <span>envsync</span>
+    </a>
+    <nav aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#diagnostics">Diagnostics</a>
+      <a href="#quickstart" class="nav-cta">Quick start</a>
+      <a href="https://github.com/ABK1-Kuul/ENVSync" class="nav-gh" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <!-- HERO ------------------------------------------------------------- -->
+    <section class="hero" id="top">
+      <p class="eyebrow"><span class="pulse" aria-hidden="true"></span>Config drift detector for Next.js + TypeScript</p>
+      <h1>Every <code>process.env</code>,<br><em>accounted for.</em></h1>
+      <p class="lede">
+        EnvSync reads your source code, your <code>envsync.config.ts</code> contract and your
+        <code>.env.example</code>, then tells you exactly where they disagree, with file, line and a fix.
+        It runs locally, never executes your code, and never reads a secret value.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#quickstart">Quick start</a>
+        <button class="btn btn-ghost copy" type="button" data-copy="node apps/cli/dist/bin.js scan path/to/next-app">
+          <span class="prompt" aria-hidden="true">$</span> envsync scan <span class="copy-hint">copy</span>
+        </button>
+      </div>
+      <p class="status-line">Pre-release · v0.0.0 · Apache-2.0 · not yet on npm</p>
+
+      <figure class="loom-frame">
+        <div class="loom" id="loom" role="img"
+             aria-label="Animated diagram: five environment variables are traced across three files: source code, envsync.config.ts and .env.example. A scan finds a variable used in code but never declared (ENV001), a required variable missing from .env.example (ENV002), and a declaration nothing reads (ENV003). The fixes are applied and a second scan shows all three files in sync."></div>
+        <noscript><p class="noscript">This diagram traces each variable from the code that reads it, to its declaration in envsync.config.ts, to its placeholder in .env.example.</p></noscript>
+      </figure>
+    </section>
+
+    <!-- HOW: three sources -------------------------------------------------- -->
+    <section class="section" id="how">
+      <header class="section-head">
+        <p class="kicker">01 · The model</p>
+        <h2>Three files should agree. Usually they don't.</h2>
+        <p>Variables get added in code and forgotten in the docs. Declarations outlive the features that used them.
+           EnvSync treats each file as a different kind of evidence and checks them against each other.</p>
+      </header>
+      <ol class="triad">
+        <li class="triad-card">
+          <svg class="triad-icon" viewBox="0 0 64 64" aria-hidden="true">
+            <rect x="8" y="10" width="48" height="44" rx="6" class="ico-frame"/>
+            <path d="M20 26 l-6 6 6 6M44 26 l6 6 -6 6M36 22 l-8 20" class="ico-stroke draw"/>
+          </svg>
+          <h3>Source <span>reads it</span></h3>
+          <p>Every <code>process.env.NAME</code>, <code>["NAME"]</code> and destructured read, found by parsing the
+             TypeScript AST. Nothing is imported or run.</p>
+          <p class="triad-tag">evidence</p>
+        </li>
+        <li class="triad-card">
+          <svg class="triad-icon" viewBox="0 0 64 64" aria-hidden="true">
+            <path d="M18 8 h22 l10 10 v38 h-32z" class="ico-frame"/>
+            <path d="M24 30 h18M24 38 h12M24 46 h16" class="ico-stroke draw"/>
+            <circle cx="46" cy="46" r="7" class="ico-seal"/>
+          </svg>
+          <h3><code>envsync.config.ts</code> <span>declares it</span></h3>
+          <p>The contract: which variables exist, which are required, which are secret. Read as data, so it
+             can't mean one thing at runtime and another to EnvSync.</p>
+          <p class="triad-tag">intent</p>
+        </li>
+        <li class="triad-card">
+          <svg class="triad-icon" viewBox="0 0 64 64" aria-hidden="true">
+            <rect x="10" y="12" width="44" height="40" rx="5" class="ico-frame"/>
+            <path d="M18 24 h14M18 32 h18M18 40 h10" class="ico-stroke draw"/>
+            <path d="M36 24 h8M40 32 h6M32 40 h10" class="ico-ghost"/>
+          </svg>
+          <h3><code>.env.example</code> <span>documents it</span></h3>
+          <p>What a new teammate copies on day one. Placeholders only. EnvSync uses the names and
+             throws the values away.</p>
+          <p class="triad-tag">documentation</p>
+        </li>
+      </ol>
+      <p class="footnote">A missing declaration is not the same as a missing runtime value. EnvSync never claims to know what's in your real environment.</p>
+    </section>
+
+    <!-- PRIVACY ------------------------------------------------------------- -->
+    <section class="section" id="privacy">
+      <header class="section-head">
+        <p class="kicker">02 · The guarantee</p>
+        <h2>Names go in. Values never leave the room.</h2>
+        <p>Your real <code>.env</code> files are never opened. Values in <code>.env.example</code> are discarded as they're read.
+           The output, terminal or JSON, only ever contains names and locations.</p>
+      </header>
+
+      <figure class="scroll-figure">
+        <svg class="airlock" viewBox="0 0 980 384" role="img" aria-labelledby="airlock-title">
+          <title id="airlock-title">.env.local is sealed and never opened. From .env.example only the variable names pass through EnvSync; values are dropped. The output contains names only.</title>
+          <defs>
+            <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <line x1="0" y1="0" x2="0" y2="8" class="hatch-line"/>
+            </pattern>
+            <linearGradient id="beam" x1="0" x2="1">
+              <stop offset="0" class="beam-a"/><stop offset="1" class="beam-b"/>
+            </linearGradient>
+          </defs>
+
+          <!-- sealed .env.local -->
+          <g class="sealed">
+            <rect x="20" y="40" width="270" height="150" rx="10" class="file"/>
+            <rect x="20" y="40" width="270" height="150" rx="10" fill="url(#hatch)" class="file-hatch"/>
+            <text x="38" y="68" class="file-name">.env.local</text>
+            <g class="cipher-rows" id="cipher">
+              <text x="38" y="102" class="kv-k">DATABASE_URL=</text><text x="160" y="102" class="kv-v cipher" data-len="12"></text>
+              <text x="38" y="130" class="kv-k">STRIPE_KEY=</text><text x="142" y="130" class="kv-v cipher" data-len="14"></text>
+              <text x="38" y="158" class="kv-k">AUTH_SECRET=</text><text x="150" y="158" class="kv-v cipher" data-len="13"></text>
+            </g>
+            <rect x="8" y="28" width="294" height="174" rx="16" class="seal-ring"/>
+            <g class="lock" transform="translate(262 22)">
+              <rect x="-14" y="0" width="28" height="22" rx="4"/>
+              <path d="M-8 0 v-6 a8 8 0 0 1 16 0 v6" class="lock-shackle"/>
+            </g>
+            <text x="155" y="232" class="caption" text-anchor="middle">never opened</text>
+          </g>
+
+          <!-- probe that bounces off the seal -->
+          <g class="probe-bounce">
+            <line x1="420" y1="115" x2="312" y2="115" class="probe-ray"/>
+            <path d="M318 105 l-10 10 10 10" class="probe-x"/>
+          </g>
+
+          <!-- .env.example -->
+          <g class="example">
+            <rect x="20" y="250" width="300" height="96" rx="10" class="file file-open"/>
+            <text x="38" y="276" class="file-name">.env.example</text>
+            <text x="38" y="304" class="kv-k">DATABASE_URL=</text><text x="160" y="304" class="kv-v placeholder drop d1">postgres://…</text>
+            <text x="38" y="330" class="kv-k">NEXT_PUBLIC_SITE_URL=</text><text x="232" y="330" class="kv-v placeholder drop d2">http://…</text>
+          </g>
+
+          <!-- envsync core -->
+          <g class="core" transform="translate(490 180)">
+            <circle r="74" class="core-ring r1"/>
+            <circle r="56" class="core-ring r2"/>
+            <circle r="38" class="core-body"/>
+            <rect x="-14" y="-8" width="11" height="4" rx="2" class="core-mark"/>
+            <rect x="3" y="-8" width="11" height="4" rx="2" class="core-mark"/>
+            <rect x="-14" y="4" width="28" height="4" rx="2" class="core-mark"/>
+            <text y="108" class="caption" text-anchor="middle">parse · compare · report</text>
+          </g>
+
+          <!-- names in flight -->
+          <g class="names-flow">
+            <text x="330" y="304" class="flow-name f1">DATABASE_URL</text>
+            <text x="330" y="330" class="flow-name f2">NEXT_PUBLIC_SITE_URL</text>
+          </g>
+          <!-- values falling away -->
+          <g class="discard">
+            <text x="200" y="374" class="caption" text-anchor="middle">values discarded</text>
+          </g>
+
+          <!-- output -->
+          <g class="output">
+            <rect x="640" y="90" width="320" height="180" rx="10" class="file file-out"/>
+            <text x="658" y="118" class="file-name">output</text>
+            <text x="658" y="150" class="out-line o1"><tspan class="sev-err">ENV002</tspan> STRIPE_KEY</text>
+            <text x="658" y="176" class="out-line o2"><tspan class="sev-warn">ENV003</tspan> LEGACY_FLAG</text>
+            <text x="658" y="202" class="out-line o3"><tspan class="sev-ok">ok</tspan> DATABASE_URL</text>
+            <text x="658" y="228" class="out-line o4"><tspan class="sev-ok">ok</tspan> NEXT_PUBLIC_SITE_URL</text>
+            <text x="800" y="296" class="caption" text-anchor="middle">names + file:line only</text>
+          </g>
+          <path d="M564 180 C 600 180, 610 180, 636 180" class="out-wire"/>
+        </svg>
+      </figure>
+
+      <ul class="guarantees">
+        <li class="g-card">
+          <svg viewBox="0 0 80 48" class="g-ico" aria-hidden="true">
+            <text x="6" y="30" class="g-key">KEY=</text>
+            <rect x="42" y="18" width="32" height="14" rx="3" class="g-redact"/>
+          </svg>
+          <h3>No values</h3>
+          <p>Never prints, stores or copies a value. <code>.env</code> / <code>.env.*</code> are never read.</p>
+        </li>
+        <li class="g-card">
+          <svg viewBox="0 0 80 48" class="g-ico" aria-hidden="true">
+            <path d="M12 12 l14 12 -14 12z" class="g-play"/>
+            <line x1="6" y1="40" x2="32" y2="8" class="g-slash"/>
+            <path d="M48 10 v8 M48 18 l-8 8 M48 18 l8 8 M40 26 v6 M56 26 v6 M56 32 l-5 6 M56 32 l5 6" class="g-tree"/>
+          </svg>
+          <h3>Parsed, never run</h3>
+          <p>Source, <code>next.config.*</code> and the config are parsed into an AST. Nothing is imported or executed.</p>
+        </li>
+        <li class="g-card">
+          <svg viewBox="0 0 80 48" class="g-ico" aria-hidden="true">
+            <rect x="6" y="14" width="22" height="20" rx="3" class="g-box"/>
+            <path d="M28 24 h12" class="g-wire"/>
+            <path d="M48 24 h14" class="g-wire g-wire-far"/>
+            <circle cx="70" cy="24" r="7" class="g-cloud"/>
+            <circle class="g-packet" cx="32" cy="24" r="2.5"/>
+          </svg>
+          <h3>No network</h3>
+          <p>The scan makes no network requests. It works offline, on a plane, behind an air gap.</p>
+        </li>
+        <li class="g-card">
+          <svg viewBox="0 0 80 48" class="g-ico" aria-hidden="true">
+            <rect x="18" y="6" width="44" height="36" rx="4" class="g-box"/>
+            <path d="M26 16 h28 M26 24 h20" class="g-solid"/>
+            <path d="M26 32 h24" class="g-preview"/>
+          </svg>
+          <h3>No surprise writes</h3>
+          <p><code>init</code> previews by default. Only <code>--write</code> writes, and it never overwrites a file.</p>
+        </li>
+      </ul>
+    </section>
+
+    <!-- BOUNDARY ------------------------------------------------------------ -->
+    <section class="section" id="boundary">
+      <header class="section-head">
+        <p class="kicker">03 · The boundary</p>
+        <h2>Secrets don't cross into the browser bundle.</h2>
+        <p>Next.js inlines <code>NEXT_PUBLIC_*</code> variables and <code>next.config</code> <code>env</code> entries into client JavaScript.
+           Declare a variable <code>secret: true</code> and EnvSync stops it at the border. Names that merely <em>look</em> secret get a warning, not a verdict.</p>
+      </header>
+      <figure class="scroll-figure">
+        <svg class="border" viewBox="0 0 980 400" role="img" aria-labelledby="border-title">
+          <title id="border-title">Server side on the left, browser bundle on the right. NEXT_PUBLIC_SITE_URL crosses freely. STRIPE_KEY, exposed through next.config env, and NEXT_PUBLIC_ADMIN_SECRET, declared secret, are stopped with ENV005 errors. NEXT_PUBLIC_API_TOKEN crosses with an ENV005 warning because its name looks secret. DATABASE_URL stays on the server.</title>
+          <defs>
+            <pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1.2" class="dot"/>
+            </pattern>
+          </defs>
+          <rect x="500" y="20" width="460" height="360" rx="14" fill="url(#dots)" class="client-zone"/>
+          <rect x="20" y="20" width="460" height="360" rx="14" class="server-zone"/>
+          <text x="44" y="54" class="zone-label">server</text>
+          <text x="936" y="54" class="zone-label" text-anchor="end">browser bundle</text>
+          <path class="membrane" d="M490 30 Q 500 70 490 110 T 490 190 T 490 270 T 490 370"/>
+          <path class="membrane membrane-2" d="M490 30 Q 480 70 490 110 T 490 190 T 490 270 T 490 370"/>
+
+          <g class="lane lane-pass" transform="translate(0 100)">
+            <g class="capsule cap-pass">
+              <rect x="60" y="-16" width="250" height="32" rx="16" class="cap"/>
+              <text x="80" y="5" class="cap-text">NEXT_PUBLIC_SITE_URL</text>
+            </g>
+            <text x="940" y="5" class="lane-tag tag-ok" text-anchor="end">public · ok</text>
+          </g>
+
+          <g class="lane lane-block" transform="translate(0 165)">
+            <g class="capsule cap-block">
+              <rect x="60" y="-16" width="200" height="32" rx="16" class="cap cap-secret"/>
+              <text x="80" y="5" class="cap-text">🔒 STRIPE_KEY</text>
+            </g>
+            <text x="60" y="34" class="lane-sub">via next.config.js env</text>
+            <g class="stop-tag st1"><rect x="510" y="-14" width="230" height="28" rx="6" class="tag-err-bg"/><text x="522" y="5" class="lane-tag tag-err">ENV005 error · secret inlined</text></g>
+          </g>
+
+          <g class="lane lane-block lb2" transform="translate(0 235)">
+            <g class="capsule cap-block cb2">
+              <rect x="60" y="-16" width="300" height="32" rx="16" class="cap cap-secret"/>
+              <text x="80" y="5" class="cap-text">🔒 NEXT_PUBLIC_ADMIN_SECRET</text>
+            </g>
+            <text x="60" y="34" class="lane-sub">declared secret: true</text>
+            <g class="stop-tag st2"><rect x="510" y="-14" width="260" height="28" rx="6" class="tag-err-bg"/><text x="522" y="5" class="lane-tag tag-err">ENV005 error · public prefix</text></g>
+          </g>
+
+          <g class="lane lane-warn" transform="translate(0 305)">
+            <g class="capsule cap-warn">
+              <rect x="60" y="-16" width="260" height="32" rx="16" class="cap cap-amber"/>
+              <text x="80" y="5" class="cap-text">NEXT_PUBLIC_API_TOKEN</text>
+            </g>
+            <text x="940" y="38" class="lane-tag tag-warn warn-tag" text-anchor="end">ENV005 warning · name contains TOKEN</text>
+          </g>
+
+          <g class="lane" transform="translate(0 362)">
+            <g class="capsule cap-stay">
+              <rect x="60" y="-14" width="190" height="28" rx="14" class="cap cap-dim"/>
+              <text x="78" y="5" class="cap-text cap-text-dim">🔒 DATABASE_URL</text>
+            </g>
+            <text x="268" y="5" class="lane-sub">server only · ok</text>
+          </g>
+        </svg>
+      </figure>
+    </section>
+
+    <!-- DIAGNOSTICS ---------------------------------------------------------- -->
+    <section class="section" id="diagnostics">
+      <header class="section-head">
+        <p class="kicker">04 · The table</p>
+        <h2>Seven kinds of drift. Each one has a stable code.</h2>
+        <p>Every finding comes with a code, a severity, the file and line, and a suggested fix. Codes are a public contract,
+           so your CI can rely on them. Pick one to see real output.</p>
+      </header>
+      <div class="ptable">
+        <div class="ptable-grid" role="tablist" aria-label="Diagnostic codes" id="ptable"></div>
+        <article class="ptable-detail" id="ptable-detail" role="tabpanel" aria-live="polite"></article>
+      </div>
+    </section>
+
+    <!-- TERMINAL --------------------------------------------------------------- -->
+    <section class="section" id="terminal">
+      <header class="section-head">
+        <p class="kicker">05 · The output</p>
+        <h2>Quiet, precise, and the same in CI.</h2>
+        <p>Real output from the repository's test fixtures, unedited. Human-readable in the terminal, stable JSON for automation,
+           and exit codes you can build on.</p>
+      </header>
+      <div class="term">
+        <div class="term-bar">
+          <span class="term-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div class="term-tabs" role="tablist" aria-label="Commands" id="term-tabs"></div>
+        </div>
+        <pre class="term-body" id="term-body" tabindex="0" aria-live="off"></pre>
+      </div>
+      <dl class="exit-codes">
+        <div><dt>0</dt><dd>In sync. With <code>--strict</code>: no warnings either, and the scan was complete.</dd></div>
+        <div><dt>1</dt><dd>Findings. Fix them or adjust the contract.</dd></div>
+        <div><dt>2</dt><dd>Couldn't run: missing config, unreadable directory, bad flag.</dd></div>
+      </dl>
+    </section>
+
+    <!-- QUICK START --------------------------------------------------------------- -->
+    <section class="section" id="quickstart">
+      <header class="section-head">
+        <p class="kicker">06 · Quick start</p>
+        <h2>Five minutes from clone to first scan.</h2>
+        <p>EnvSync isn't published to npm yet. Until the first release, run it from source. You need
+           Node.js 22.12+ and pnpm 12.10.1.</p>
+      </header>
+
+      <ol class="steps">
+        <li class="step">
+          <div class="step-n" aria-hidden="true">1</div>
+          <div class="step-body">
+            <h3>Clone and build</h3>
+            <div class="code">
+              <pre><code>git clone https://github.com/ABK1-Kuul/ENVSync.git
+cd ENVSync
+npm install --global pnpm@12.10.1
+pnpm install
+pnpm build</code></pre>
+              <button class="copy code-copy" type="button" data-copy="git clone https://github.com/ABK1-Kuul/ENVSync.git&#10;cd ENVSync&#10;npm install --global pnpm@12.10.1&#10;pnpm install&#10;pnpm build">copy</button>
+            </div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-n" aria-hidden="true">2</div>
+          <div class="step-body">
+            <h3>Preview a starter contract</h3>
+            <p>Lists every variable your code reads statically. Nothing is written yet.</p>
+            <div class="code">
+              <pre><code>node apps/cli/dist/bin.js init path/to/next-app</code></pre>
+              <button class="copy code-copy" type="button" data-copy="node apps/cli/dist/bin.js init path/to/next-app">copy</button>
+            </div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-n" aria-hidden="true">3</div>
+          <div class="step-body">
+            <h3>Write it, then make it yours</h3>
+            <p>Creates <code>envsync.config.ts</code> and <code>.env.example</code> with empty placeholders. Existing files are never overwritten.
+               Then mark what's secret and what's optional.</p>
+            <div class="code">
+              <pre><code>node apps/cli/dist/bin.js init path/to/next-app --write</code></pre>
+              <button class="copy code-copy" type="button" data-copy="node apps/cli/dist/bin.js init path/to/next-app --write">copy</button>
+            </div>
+            <div class="code code-ts">
+              <span class="code-file">envsync.config.ts</span>
+              <pre><code><span class="t-k">export default</span> {
+  variables: {
+    DATABASE_URL: { required: <span class="t-b">true</span>, secret: <span class="t-b">true</span>, type: <span class="t-s">"url"</span> },
+    NEXT_PUBLIC_SITE_URL: { secret: <span class="t-b">false</span>, type: <span class="t-s">"url"</span> },
+    SENTRY_RELEASE: { required: <span class="t-b">false</span>, external: <span class="t-b">true</span> },
+  },
+};</code></pre>
+            </div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-n" aria-hidden="true">4</div>
+          <div class="step-body">
+            <h3>Scan</h3>
+            <p>Run it whenever you touch config. Check your local setup with <code>doctor</code>, which also catches <code>.env.local</code> files that git doesn't ignore.</p>
+            <div class="code">
+              <pre><code>node apps/cli/dist/bin.js scan path/to/next-app
+node apps/cli/dist/bin.js doctor path/to/next-app</code></pre>
+              <button class="copy code-copy" type="button" data-copy="node apps/cli/dist/bin.js scan path/to/next-app&#10;node apps/cli/dist/bin.js doctor path/to/next-app">copy</button>
+            </div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-n" aria-hidden="true">5</div>
+          <div class="step-body">
+            <h3>Gate CI</h3>
+            <p><code>--strict</code> also fails on warnings and incomplete scans. <code>--format json</code> gives machine-readable output with a versioned schema.</p>
+            <div class="code">
+              <pre><code>node apps/cli/dist/bin.js scan path/to/next-app --strict --format json</code></pre>
+              <button class="copy code-copy" type="button" data-copy="node apps/cli/dist/bin.js scan path/to/next-app --strict --format json">copy</button>
+            </div>
+            <p class="step-note">A ready-made GitHub Actions workflow, including the setup planned for after the npm release, is in
+               <a href="https://github.com/ABK1-Kuul/ENVSync/blob/main/docs/CI.md" rel="noopener">docs/CI.md</a>.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="closer">
+      <svg class="closer-mark" viewBox="0 0 320 80" aria-hidden="true">
+        <rect class="cm cm-l" x="10" y="18" width="140" height="14" rx="7"/>
+        <rect class="cm cm-r" x="170" y="18" width="140" height="14" rx="7"/>
+        <rect class="cm cm-b" x="10" y="48" width="300" height="14" rx="7"/>
+      </svg>
+      <h2>Close the gap before it breaks the build.</h2>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#quickstart">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/ABK1-Kuul/ENVSync" rel="noopener">Star on GitHub</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p><span class="brand-inline">envsync</span> · Apache-2.0 · Next.js + TypeScript</p>
+    <p>This page loads no third-party scripts, fonts or trackers.</p>
+    <p><a href="https://github.com/ABK1-Kuul/ENVSync/blob/main/docs/CLI.md" rel="noopener">CLI reference</a> ·
+       <a href="https://github.com/ABK1-Kuul/ENVSync/blob/main/SECURITY.md" rel="noopener">Security</a> ·
+       <a href="https://github.com/ABK1-Kuul/ENVSync/blob/main/CHANGELOG.md" rel="noopener">Changelog</a></p>
+  </footer>
+</body>
+</html>
