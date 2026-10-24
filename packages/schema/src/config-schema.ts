@@ -2,7 +2,7 @@ import ts from "typescript";
 import { isValidVariableName, isVariableType, VARIABLE_TYPES, type VariableType } from "./validation.js";
 
 /**
- * Static reader for `envsync.config.ts` (ADR-005).
+ * Static reader for `envsync.config.ts`.
  *
  * The file is parsed into a TypeScript AST and only a constrained literal subset is understood.
  * It is never imported, evaluated or executed. Anything outside the subset becomes a `ConfigIssue`

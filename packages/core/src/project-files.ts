@@ -105,10 +105,14 @@ export async function readProjectFile(directory: string, fileName: string): Prom
     case "missing":
       return null;
     case "not-regular":
-    case "changed":
       throw new ScanError(
         "UNSAFE_PATH",
         `Refusing to read ${fileName} because it is not a regular file (symbolic links are not followed). Replace it with a regular file inside the project.`,
+      );
+    case "changed":
+      throw new ScanError(
+        "READ_FAILED",
+        `${fileName} changed or was replaced while EnvSync was reading it, so it was not used. Run the command again once the file is no longer being written.`,
       );
     case "too-large":
       throw new ScanError("FILE_TOO_LARGE", `${fileName} is larger than ${MAX_FILE_BYTES} bytes. Check that it is the intended file.`);
@@ -161,7 +165,9 @@ export async function readRegularFileBytes(absolutePath: string, maxBytes = MAX_
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    return { ok: true, bytes: buffer.subarray(0, offset) };
+    // A file that ended early shrank while being read; a partial read is never reported as the file.
+    if (offset !== buffer.length) return { ok: false, reason: "changed" };
+    return { ok: true, bytes: buffer };
   } catch {
     return { ok: false, reason: "unreadable" };
   } finally {

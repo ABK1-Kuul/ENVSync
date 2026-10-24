@@ -28,10 +28,13 @@ for (const file of Object.values(inputs)) {
   if (!stats.isFile()) throw new Error(`Refusing to stage ${file}: it is not a regular file (symbolic links are not followed).`);
 }
 
-const outIndex = process.argv.indexOf("--out");
+const outIndex = process.argv.findIndex((arg) => arg === "--out" || arg.startsWith("--out="));
 let outDir;
 if (outIndex !== -1) {
-  outDir = path.resolve(process.argv[outIndex + 1] ?? "");
+  const arg = process.argv[outIndex];
+  const value = arg.startsWith("--out=") ? arg.slice("--out=".length) || undefined : process.argv[outIndex + 1];
+  if (value === undefined || value.startsWith("--")) throw new Error("--out needs a directory, for example: --out ./envsync-stage");
+  outDir = path.resolve(value);
   await mkdir(outDir, { recursive: true });
   if ((await readdir(outDir)).length > 0) throw new Error(`Refusing to stage into non-empty directory ${outDir}`);
 } else {

@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to EnvSync are documented here. Diagnostic codes, exit codes and the JSON
-output shape are public contracts (ADR-003); changes to them are called out explicitly.
+output shape are public contracts; changes to them are called out explicitly.
 
 ## [Unreleased]
 
@@ -56,11 +56,47 @@ output shape are public contracts (ADR-003); changes to them are called out expl
   - Package staging refuses symlinked inputs.
   - Documentation recommends running `npx envsync` outside the checkout, so a repository's
     `.npmrc` cannot change what runs.
+- Hardening from the final review round:
+  - `doctor` searches for the repository from the project's real path (symlinks and junctions
+    resolved), as git does; if the real path cannot be resolved the result is `unknown`.
+  - `.git` detection follows git's rules in both directions: a `.git` git definitely rejects is
+    passed over; one git might accept but EnvSync cannot verify (links, `commondir`, `objects`/`refs`
+    that are not plain directories, an oversized `HEAD`), or a search that hits the 64-level
+    limit, gives `unknown` instead of `skip`. `HEAD` is checked like git (first 255 bytes,
+    `ref:` + space/tab/CR/LF, 40+ hex digits in any case).
+  - Case folding reproduces git's asymmetry (escaped letters and single class members are not
+    folded), reversed class ranges match their first character like git, and anchored patterns use
+    git's literal-prefix split, so `!apps**/.env.local`, `.[E]nv.local` and `!.[e-a]nv.local` no
+    longer produce a false pass.
+  - `core.ignorecase` is only trusted from an exact `[core]` section of a fully parsed
+    `.git/config`; otherwise both settings are evaluated and a result that depends on it is
+    `unknown`. A tracked file whose name differs only by letter case is `unknown` unless
+    `core.ignorecase=true` (then it is tracked): with `false`, `git commit -a` still commits it on
+    a case-insensitive file system.
+  - Tracking answers are `unknown` whenever repository detection had any doubt, and for paths
+    outside the checked project.
+  - A file that shrinks while being read is reported as changed, never as complete, with an
+    accurate message.
+
+### Changed
+- A symbolic link marks a scan incomplete unless its name is clearly not scanned (env files,
+  excluded directories, type declarations, known non-source extensions such as images, `.md` or
+  `.json`); a linked `node_modules`, image or `.env.local` no longer makes `scan --strict` fail,
+  while a linked `api.v2` or `[...slug]` directory still does.
+- `dist`, `build`, `out` and `coverage` are scanned inside the project's Next.js route tree
+  (`app/` or `pages/` at the root or under `src/`), where they are route segments.
+- `doctor`'s `source-files` check warns about paths that will not be scanned and is `unknown` when
+  the project exceeds the scan limits; incomplete-scan messages say "at least N paths" after a limit.
+- Scan JSON adds `summary.dynamicAccesses`, and the terminal summary always mentions dynamic
+  `process.env` access (ENV006); it is reported but does not fail `--strict`.
+- Additive JSON contract changes within schema version 1 are documented in docs/CLI.md.
 
 ### Fixed
 - Windows CI: `.gitattributes` fixes line endings to LF; CI installs the pinned pnpm directly
   because the Corepack bundled with Node 22.12.0 cannot run pnpm 12; the packaging step uses
   paths relative to `RUNNER_TEMP` (GNU tar misreads `D:\...`) and locale-independent sorting.
+- CI smoke tests now require exactly exit code 1 for the drift fixture (exit 0 used to pass), and
+  the internal-name leak check no longer misses matches under `pipefail`.
 - `init` no longer appends the same block repeatedly to a `.env.example` that ends inside an
   unclosed quote, and no longer reports "already lists every declared variable" for a broken config.
 - Documentation no longer suggests importing `defineConfig` from `envsync` (it is not exported).

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runDoctor } from "@envsync-internal/core";
 import { nextFramework } from "@envsync-internal/parser-next";
@@ -126,6 +126,26 @@ describe("envsync doctor", () => {
     expect(warning.json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("warn");
   });
 
+  test("an unverifiable .git (a link) is unknown, not 'skip', and --strict fails on it", async () => {
+    fixture = await copyFixture("next-app-router");
+    const realRepo = path.join(path.dirname(fixture.root), "real-repo");
+    await makeMinimalGitDirectory(realRepo);
+    await symlink(path.join(realRepo, ".git"), path.join(fixture.root, ".git"), process.platform === "win32" ? "junction" : "dir");
+
+    const checks = await runDoctor({ root: fixture.root, framework: nextFramework, gitSearchCeiling: fixture.root });
+    const check = checks.find((c) => c.id === "env-files-ignored");
+    expect(check?.status).toBe("unknown");
+    expect(check?.message).toContain("cannot tell whether");
+  });
+
+  test("source-files reports skipped symlinks by reason, and is not a pass", async () => {
+    const root = await healthyRepo();
+    await symlink(path.join(root, "lib"), path.join(root, "linked-lib"), process.platform === "win32" ? "junction" : "dir");
+    const check = (await doctor(root)).json.checks.find((c) => c.id === "source-files");
+    expect(check).toMatchObject({ status: "warn" });
+    expect(check?.message).toContain("1 symlinked path will not be scanned");
+  });
+
   test("warns when .env.local would not be ignored even though it does not exist yet", async () => {
     const root = await healthyRepo("node_modules/\n");
     const run = await doctor(root);
@@ -147,6 +167,38 @@ describe("envsync doctor", () => {
     await writeFile(path.join(root, ".env.LOCAL"), "X=\n");
     const run = await doctor(root);
     expect(run.json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("fail");
+  });
+
+  test.skipIf(!hasGit)("a case-only tracked match with undetermined core.ignorecase is unknown, never pass (security review HIGH)", async () => {
+    fixture = await copyFixture("next-app-router");
+    const root = fixture.root;
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args]);
+    git("init", "-q");
+    git("config", "core.ignorecase", "true");
+    await writeFile(path.join(root, ".env.LOCAL"), "X=\n");
+    git("add", "-f", ".env.LOCAL");
+    // Rename on disk only (two steps, so it also works on case-insensitive file systems).
+    await rename(path.join(root, ".env.LOCAL"), path.join(root, "tmp-env"));
+    await rename(path.join(root, "tmp-env"), path.join(root, ".env.local"));
+    await writeFile(path.join(root, ".gitignore"), ".env*.local\n");
+    // One value EnvSync does not parse makes core.ignorecase undetermined.
+    git("config", "alias.co", '"checkout"');
+
+    const run = await doctor(root);
+    const check = run.json.checks.find((c) => c.id === "env-files-ignored");
+    expect(check?.status).toBe("unknown");
+    expect(check?.message).toContain("differs from .env.local only by letter case");
+
+    // With the setting established, git's answer (tracked) is reported as a failure.
+    git("config", "--unset", "alias.co");
+    expect((await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("fail");
+
+    // core.ignorecase=false does not make it safe: on a case-insensitive file system
+    // `git commit -a` still commits the file through its tracked name (reproduced with git).
+    git("config", "core.ignorecase", "false");
+    const explicitFalse = (await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored");
+    expect(explicitFalse?.status).toBe("unknown");
+    expect(explicitFalse?.message).toContain("even with core.ignorecase=false");
   });
 
   test.skipIf(!hasGit)("a committed .env.local fails even when .gitignore lists it", async () => {

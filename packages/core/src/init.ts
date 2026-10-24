@@ -43,6 +43,8 @@ export type InitPlan = {
   skippedNames: string[];
   /** Paths that were not scanned (symlinks, unreadable, too large, limits); declarations may be missing. */
   notScanned: number;
+  /** True when scanning stopped at a resource limit; `notScanned` then undercounts. */
+  stoppedAtLimit: boolean;
   dynamicAccessCount: number;
   /** Problems found in an existing config (run `scan` for details). */
   configIssueCount: number;
@@ -137,6 +139,7 @@ export async function planInit({ root, framework }: { root: string; framework: F
     exampleAdditions,
     skippedNames: [...skippedNames].sort(compare),
     notScanned: evidence.skipped.length,
+    stoppedAtLimit: evidence.skipped.some((entry) => entry.reason === "limit-reached"),
     dynamicAccessCount,
     configIssueCount,
     caseCollisions: caseOnlyGroups([...existingNames, ...exampleAdditions]),

@@ -1,5 +1,5 @@
 /**
- * Public diagnostic model. Codes and the JSON shape are a public contract (ADR-003):
+ * Public diagnostic model. Codes and the JSON shape are a public contract:
  * do not rename, repurpose or remove a code once released.
  */
 

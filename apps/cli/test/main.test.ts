@@ -81,6 +81,25 @@ describe("exit codes", () => {
   });
 });
 
+describe("init formatter", () => {
+  test("a plan from a scan stopped at a limit says it is incomplete", async () => {
+    const { formatInitPlan } = await import("../src/formatters/init.js");
+    const plan = {
+      changes: [],
+      configVariables: [],
+      exampleAdditions: [],
+      skippedNames: [],
+      notScanned: 1,
+      stoppedAtLimit: true,
+      dynamicAccessCount: 0,
+      configIssueCount: 0,
+      caseCollisions: [],
+    };
+    expect(formatInitPlan(plan, null)).toContain("scanning stopped at a resource limit, so many files were not scanned and this plan is incomplete");
+    expect(formatInitPlan({ ...plan, stoppedAtLimit: false }, null)).toContain("1 path was not scanned");
+  });
+});
+
 describe("formatters", () => {
   test("terminal output for a clean project", async () => {
     fixture = await copyFixture("next-app-router");

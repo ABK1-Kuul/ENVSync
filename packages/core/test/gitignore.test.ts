@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -51,7 +51,8 @@ async function initRepo(dir: string, ignoreCase: boolean): Promise<void> {
 function gitIgnored(dir: string, names: string[]): Record<string, boolean> {
   let output = "";
   try {
-    output = git(dir, ["check-ignore", "--no-index", "--stdin", "-z", "-v", "-n"], names.join("\0") + "\0");
+    // No global excludes file, so a developer's own settings cannot change the reference answer.
+    output = git(dir, ["-c", "core.excludesFile=", "check-ignore", "--no-index", "--stdin", "-z", "-v", "-n"], names.join("\0") + "\0");
   } catch (error) {
     // Exit code 1 means "nothing ignored"; stdout still carries the -n records.
     output = String((error as { stdout?: string }).stdout ?? "");
@@ -70,7 +71,8 @@ async function oursIgnored(dir: string, names: string[]): Promise<Record<string,
   return Object.fromEntries(names.map((name) => [name, isIgnoredFile(context, dir, name)]));
 }
 
-const NAMES = [".env", ".env.local", ".env.production.local", ".env.LOCAL", ".ENV.local", ".env.example", "a!b", "#nope"];
+// `.env.zocal`/`.env.Focal` give reversed-range patterns like `.env.[z-a]ocal` something to match.
+const NAMES = [".env", ".env.local", ".env.production.local", ".env.LOCAL", ".ENV.local", ".env.example", "a!b", "#nope", ".env.zocal", ".env.Focal"];
 
 // Each entry is the full .gitignore content. Includes every case from the security review.
 const CORPUS: string[] = [
@@ -109,6 +111,25 @@ const CORPUS: string[] = [
   ".env.[!a-k]ocal",
   ".env.local\\",
   "*a*a*a*a*a*a*a*a*a*a*a*a*b",
+  // Case-folding asymmetry (git folds the path and plain pattern letters, not escaped letters or
+  // single class members): reported by the final code review as a false PASS.
+  ".[E]nv.local",
+  ".\\Env.local",
+  ".env.\\Local",
+  ".[\\E]nv.local",
+  ".[!E]nv.local",
+  ".[A-Z]nv.local",
+  ".[D-F]NV.LOCAL",
+  ".[[:upper:]]nv.local",
+  ".[[:lower:]]NV.local",
+  ".ENV.LOCAL",
+  ".env*.local\n!.[E]NV.local",
+  ".env*.local\n!.\\ENV.local",
+  // git compares a range start as a single member first, so reversed ranges match their start.
+  ".env*\n!.[e-a]nv.local",
+  ".env.[F-A]ocal",
+  ".env.[f-a]ocal",
+  ".env.[z-a]ocal\n.env.[[:space:]]ocal",
 ];
 
 describe.skipIf(gitVersion === null)(`gitignore matching agrees with ${gitVersion ?? "git"}`, () => {
@@ -135,6 +156,13 @@ describe.skipIf(gitVersion === null)(`gitignore matching agrees with ${gitVersio
       { ".gitignore": "apps[/]web/.env.local\n" },
       { ".gitignore": "apps?web/.env.local\n" },
       { ".gitignore": "apps[!a]web/.env.local\n" },
+      // git's literal-prefix split: after "apps", `**/` starts the pattern and crosses directories.
+      { ".gitignore": "apps**/.env.local\n" },
+      { ".gitignore": "*.local\n!apps**/.env.local\n" },
+      { ".gitignore": "*.local\n!app**/web/.env.local\n" },
+      { ".gitignore": "*.local\n!apps/**/.env.local\n" },
+      { ".gitignore": "apps/web**\n" },
+      { ".gitignore": "*.local\n!APPS/WEB/.env.local\n" },
     ];
     for (const files of cases) {
       await rm(path.join(repo, "apps"), { recursive: true, force: true });
@@ -184,24 +212,24 @@ describe.skipIf(gitVersion === null)(`gitignore matching agrees with ${gitVersio
 
 describe("wildmatch is linear-time on hostile input", () => {
   test("many stars against a long non-matching name finish quickly", () => {
-    const pattern = compileWildmatch(`${"*a".repeat(60)}*b`, false);
+    const pattern = compileWildmatch(`${"*a".repeat(60)}*b`);
     const name = `.env.${"a".repeat(20_000)}`;
     const started = performance.now();
-    expect(wildmatch(pattern, name)).toBe(false);
+    expect(wildmatch(pattern, name, false)).toBe(false);
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   test("repeated globstars against a deep path finish quickly", () => {
-    const pattern = compileWildmatch(`${"**/".repeat(200)}x`, false);
+    const pattern = compileWildmatch(`${"**/".repeat(200)}x`);
     const text = `${"d/".repeat(2_000)}y`;
     const started = performance.now();
-    expect(wildmatch(pattern, text)).toBe(false);
+    expect(wildmatch(pattern, text, false)).toBe(false);
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   test("malformed classes never throw", () => {
     for (const pattern of ["[z-a]", "[", "[!", "[[:x:]]", "a\\", "[a-", "[\\"]) {
-      expect(() => wildmatch(compileWildmatch(pattern, false), "a")).not.toThrow();
+      expect(() => wildmatch(compileWildmatch(pattern), "a", true)).not.toThrow();
     }
   });
 });
@@ -382,6 +410,173 @@ describe("repository detection and incomplete rules", () => {
     expect((await loadIgnoreContext(project, { ceiling: workspace })).repositoryRoot).toBe(outer);
   });
 
+  test.each([
+    ["ref: with no space", "ref:refs/heads/main\n"],
+    ["ref: with a tab", "ref:\trefs/heads/main\n"],
+    ["upper-case detached SHA-1", `${"ABCDEF0123".repeat(4)}\n`],
+    ["detached SHA-256", `${"0123456789abcdef".repeat(4)}\n`],
+  ])("HEAD forms git accepts are accepted: %s", async (_label, head) => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".git", "HEAD"), head);
+    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(repo);
+  });
+
+  test("a .git that EnvSync cannot verify (a link) gives unknown, never 'not in a repository'", async () => {
+    const realGitDir = path.join(workspace, "elsewhere", "gitdir");
+    await makeMinimalGitDirectory(path.dirname(realGitDir));
+    const project = path.join(workspace, "project");
+    await mkdir(project);
+    // A junction needs no privilege on Windows; git follows it, EnvSync deliberately does not.
+    await symlink(path.join(path.dirname(realGitDir), ".git"), path.join(project, ".git"), process.platform === "win32" ? "junction" : "dir");
+    await writeFile(path.join(project, ".gitignore"), ".env*.local\n");
+
+    const context = await loadIgnoreContext(project, { ceiling: workspace });
+    expect(context.repositoryRoot).toBeNull();
+    expect(explainIgnoreStatus(context, project, ".env.local")).toMatchObject({ status: "unknown" });
+    expect(isTrackedFile(context, project, ".env.local")).toBeUndefined();
+  });
+
+  test("linked objects/ or refs/ inside .git make the repository unverifiable", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    const elsewhere = path.join(workspace, "objects-elsewhere");
+    await mkdir(elsewhere);
+    await rm(path.join(repo, ".git", "objects"), { recursive: true });
+    await symlink(elsewhere, path.join(repo, ".git", "objects"), process.platform === "win32" ? "junction" : "dir");
+    const context = await loadIgnoreContext(repo, { ceiling: workspace });
+    expect(context.repositoryRoot).toBeNull();
+    expect(ignoreStatus(context, repo, ".env.local")).toBe("unknown");
+  });
+
+  test("a symlinked HEAD makes the repository unverifiable", async (context) => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await rm(path.join(repo, ".git", "HEAD"));
+    try {
+      await symlink("refs/heads/main", path.join(repo, ".git", "HEAD"), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") context.skip("file symlinks are not permitted for this user on this platform");
+      throw error;
+    }
+    expect(ignoreStatus(await loadIgnoreContext(repo, { ceiling: workspace }), repo, ".env.local")).toBe("unknown");
+  });
+
+  test("the repository search follows the real path, as git does (symlinked or junctioned project path)", async () => {
+    const repo = path.join(workspace, "real", "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".gitignore"), ".env*.local\n");
+    const project = path.join(repo, "apps", "web");
+    await mkdir(project, { recursive: true });
+    // `workspace/link` points into the repository; walking its lexical parents would never find it.
+    const link = path.join(workspace, "link");
+    await symlink(project, link, process.platform === "win32" ? "junction" : "dir");
+
+    const context = await loadIgnoreContext(link, { ceiling: workspace });
+    expect(context.repositoryRoot).toBe(await realpath(repo));
+    expect(ignoreStatus(context, link, ".env.local")).toBe("ignored");
+    expect(ignoreStatus(context, link, "notes.txt")).toBe("not-ignored");
+  });
+
+  test.each([
+    ["HEAD longer than git reads (4 KB+)", `ref: refs/heads/main\n${"x".repeat(5_000)}`],
+    ["objects/ as a regular file", "ref: refs/heads/main\n"],
+    ["a commondir file", "ref: refs/heads/main\n"],
+  ])("a .git git may accept but EnvSync cannot verify is unknown, not passed over: %s", async (label, head) => {
+    const outer = path.join(workspace, "outer");
+    await makeMinimalGitDirectory(outer);
+    await writeFile(path.join(outer, ".gitignore"), ".env*.local\n");
+    const project = path.join(outer, "apps", "web");
+    await makeMinimalGitDirectory(project);
+    await writeFile(path.join(project, ".git", "HEAD"), head);
+    if (label.startsWith("objects")) {
+      await rm(path.join(project, ".git", "objects"), { recursive: true });
+      await writeFile(path.join(project, ".git", "objects"), "");
+    }
+    if (label.startsWith("a commondir")) await writeFile(path.join(project, ".git", "commondir"), "../../.git\n");
+
+    const context = await loadIgnoreContext(project, { ceiling: workspace });
+    expect(explainIgnoreStatus(context, project, ".env.local")).toMatchObject({ status: "unknown" });
+    expect(isTrackedFile(context, project, ".env.local")).toBeUndefined();
+  });
+
+  test("HEAD with more hex digits than a hash is accepted; ref: followed by a vertical tab is not (git's isspace)", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".git", "HEAD"), `${"a".repeat(41)}\n`);
+    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(repo);
+
+    await writeFile(path.join(repo, ".git", "HEAD"), `ref:${String.fromCharCode(11)}refs/heads/main\n`);
+    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBeNull();
+  });
+
+  test("a project path whose real path cannot be resolved is unknown", async () => {
+    const missing = path.join(workspace, "does-not-exist");
+    const context = await loadIgnoreContext(missing, { ceiling: workspace });
+    expect(context.problems.join(" ")).toContain("could not be resolved");
+    expect(ignoreStatus(context, missing, ".env.local")).toBe("unknown");
+  });
+
+  test("asking about a path outside the loaded project is unknown, not a definite answer", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    const elsewhere = path.join(workspace, "elsewhere");
+    await mkdir(elsewhere);
+    const context = await loadIgnoreContext(repo, { ceiling: workspace });
+    expect(ignoreStatus(context, elsewhere, ".env.local")).toBe("unknown");
+    expect(isTrackedFile(context, elsewhere, ".env.local")).toBeUndefined();
+  });
+
+  test("when ignorecase is set but the config has unparsed lines, the reason says so", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".git", "config"), '[core]\n\tignorecase = true\n\teditor = "code --wait"\n');
+    await writeFile(path.join(repo, ".gitignore"), ".ENV.local\n");
+    const verdict = explainIgnoreStatus(await loadIgnoreContext(repo, { ceiling: workspace }), repo, ".env.local");
+    expect(verdict.status).toBe("unknown");
+    expect(verdict.reasons[0]).toContain("could not be confirmed because .git/config has lines EnvSync does not parse");
+  });
+
+  test("a project deeper than the search limit is unknown, not 'not in a repository'", async () => {
+    const deep = path.join(workspace, ...Array.from({ length: 66 }, () => "d"));
+    await mkdir(deep, { recursive: true });
+    const context = await loadIgnoreContext(deep, { ceiling: workspace });
+    expect(context.repositoryRoot).toBeNull();
+    expect(explainIgnoreStatus(context, deep, ".env.local")).toMatchObject({ status: "unknown" });
+    expect(context.problems.join(" ")).toContain("levels deep");
+  });
+
+  test("when core.ignorecase is not set in .git/config, a verdict that depends on it is unknown", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo); // no config file at all
+    await writeFile(path.join(repo, ".gitignore"), ".ENV.LOCAL\n.env.test.local\n");
+    const context = await loadIgnoreContext(repo, { ceiling: workspace });
+    expect(context.ignoreCase).toBeUndefined();
+    // Depends on the setting: matched only when case is ignored.
+    expect(explainIgnoreStatus(context, repo, ".env.local")).toMatchObject({
+      status: "unknown",
+      reasons: ["the result depends on core.ignorecase, which .git/config does not set (global settings are not read)"],
+    });
+    // Same answer either way: reported normally.
+    expect(ignoreStatus(context, repo, ".env.test.local")).toBe("ignored");
+    expect(ignoreStatus(context, repo, "other.txt")).toBe("not-ignored");
+
+    await writeFile(path.join(repo, ".git", "config"), "[core]\n\tignorecase = true\n");
+    expect(ignoreStatus(await loadIgnoreContext(repo, { ceiling: workspace }), repo, ".env.local")).toBe("ignored");
+  });
+
+  test("a config EnvSync cannot fully parse falls back to evaluating both case settings", async () => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".git", "config"), '[core]\n\tignorecase = false\n[include]\n\tpath = elsewhere\n');
+    await writeFile(path.join(repo, ".gitignore"), ".ENV.LOCAL\n");
+    const context = await loadIgnoreContext(repo, { ceiling: workspace });
+    expect(context.ignoreCase).toBeUndefined();
+    expect(ignoreStatus(context, repo, ".env.local")).toBe("unknown");
+    // A file no rule could ignore under either setting is still definitely not ignored.
+    expect(ignoreStatus(context, repo, ".env.production.local")).toBe("not-ignored");
+  });
+
   test("a .git file (worktree or submodule) makes every verdict unknown", async () => {
     const root = path.join(workspace, "worktree");
     await mkdir(root);
@@ -439,11 +634,37 @@ describe("git config parsing", () => {
   });
 
   test("pathological lines are linear-time and counted as unparsed", () => {
+    // Generous bound: a quadratic parser would take minutes on this input, a linear one milliseconds.
     const started = performance.now();
     const result = parseGitConfig(`[core]\n\tignorecase = a${" ".repeat(500_000)}b\n${"[".repeat(100_000)}\n`);
-    expect(performance.now() - started).toBeLessThan(1_000);
-    expect(result.ignoreCase).toBe(false);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(result.ignoreCase).toBeUndefined();
     expect(result.unparsedLines).toBeGreaterThan(0);
+  });
+
+  test.each([
+    ["key on the header line", "[core] ignorecase = true\n"],
+    ["quoted value", '[core]\n\tignorecase = "true"\n'],
+    ["line continuation", "[core]\n\tignorecase = \\\n\ttrue\n"],
+    ["include section", "[include]\n\tpath = other.config\n"],
+    ["includeIf section", '[includeIf "gitdir:~/work/"]\n\tpath = work.config\n'],
+    ["non-boolean value", "[core]\n\tignorecase = maybe\n"],
+  ])("anything not fully understood is counted as unparsed: %s", (_label, text) => {
+    expect(parseGitConfig(text).unparsedLines).toBeGreaterThan(0);
+  });
+
+  test("only an exact [core] header sets core.ignorecase; worktreeConfig makes it unparsed", () => {
+    expect(parseGitConfig('[core "x"]\n\tignorecase = false\n')).toEqual({ ignoreCase: undefined, sha256: false, unparsedLines: 0 });
+    expect(parseGitConfig("[core.x]\n\tignorecase = false\n")).toMatchObject({ ignoreCase: undefined });
+    expect(parseGitConfig("[CORE]\n\tignorecase = false\n")).toMatchObject({ ignoreCase: false });
+    expect(parseGitConfig("[core]\n\tignorecase = true\n[extensions]\n\tworktreeConfig = true\n").unparsedLines).toBeGreaterThan(0);
+  });
+
+  test("git booleans: words, integers and a bare key", () => {
+    expect(parseGitConfig("[core]\n\tignorecase = 2\n")).toMatchObject({ ignoreCase: true, unparsedLines: 0 });
+    expect(parseGitConfig("[core]\n\tignorecase = 0\n")).toMatchObject({ ignoreCase: false, unparsedLines: 0 });
+    expect(parseGitConfig("[core]\n\tignorecase\n")).toMatchObject({ ignoreCase: true, unparsedLines: 0 });
+    expect(parseGitConfig("[core]\n\tbare = true\n")).toMatchObject({ ignoreCase: undefined, unparsedLines: 0 });
   });
 
   test("outside a git repository nothing is ignored or tracked", async () => {

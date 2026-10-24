@@ -2,7 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
- * Source discovery for the scan pipeline (steps 1–2 in ARCHITECTURE.md).
+ * Source discovery for the scan pipeline: the first step, before any file is read.
  *
  * Security properties:
  * - Only directory listings and the root's metadata are read; file contents are never opened.
@@ -13,7 +13,18 @@ import path from "node:path";
 
 export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"] as const;
 
-export const EXCLUDED_DIRECTORIES = [".git", "node_modules", ".next", "dist", "build", "out", "coverage"] as const;
+/** Never scanned, at any depth: version control, dependencies and the Next.js build cache. */
+export const ALWAYS_EXCLUDED_DIRECTORIES = [".git", "node_modules", ".next"] as const;
+
+/**
+ * Generated output, skipped at any depth except inside a Next.js `app/` or `pages/` directory,
+ * where these names are ordinary route segments (`app/build/page.tsx` is the `/build` route).
+ */
+export const GENERATED_OUTPUT_DIRECTORIES = ["dist", "build", "out", "coverage"] as const;
+
+export const EXCLUDED_DIRECTORIES = [...ALWAYS_EXCLUDED_DIRECTORIES, ...GENERATED_OUTPUT_DIRECTORIES] as const;
+
+const ROUTE_DIRECTORIES = new Set(["app", "pages"]);
 
 // Generated type declarations (e.g. Next.js's `next-env.d.ts`) never contain runtime env access.
 const DECLARATION_SUFFIXES = [".d.ts", ".d.mts", ".d.cts"] as const;
@@ -78,9 +89,11 @@ export async function discoverSourceFiles(root: string, maxEntries = MAX_DISCOVE
         break traversal;
       }
       if (entry.isSymbolicLink()) {
-        skipped.push({ path: toRelative(absoluteRoot, entryPath), reason: "symlink" });
+        // Only links that could have been scanned make the scan incomplete; a linked
+        // node_modules, image or .env file would never have been read anyway.
+        if (couldBeScanned(entry.name, directory, absoluteRoot)) skipped.push({ path: toRelative(absoluteRoot, entryPath), reason: "symlink" });
       } else if (entry.isDirectory()) {
-        if (!isExcludedDirectory(entry.name)) pending.push(entryPath);
+        if (!isExcludedDirectory(entry.name, directory, absoluteRoot)) pending.push(entryPath);
       } else if (entry.isFile() && isSourceFile(entry.name)) {
         files.push(toRelative(absoluteRoot, entryPath));
       }
@@ -109,9 +122,49 @@ async function assertDirectory(absoluteRoot: string): Promise<void> {
 }
 
 // Names are compared case-insensitively because Windows and macOS filesystems usually are.
-function isExcludedDirectory(name: string): boolean {
-  return (EXCLUDED_DIRECTORIES as readonly string[]).includes(name.toLowerCase());
+function isExcludedDirectory(name: string, parent: string, absoluteRoot: string): boolean {
+  const lower = name.toLowerCase();
+  if ((ALWAYS_EXCLUDED_DIRECTORIES as readonly string[]).includes(lower)) return true;
+  if (!(GENERATED_OUTPUT_DIRECTORIES as readonly string[]).includes(lower)) return false;
+  return !isInsideRouteDirectory(parent, absoluteRoot);
 }
+
+/**
+ * Whether `directory` is inside the project's Next.js route tree: `app/` or `pages/` at the project
+ * root or under `src/` (case-insensitive). Other directories that happen to be named `app`, like
+ * `packages/app/dist`, keep the generated-output exclusion.
+ */
+function isInsideRouteDirectory(directory: string, absoluteRoot: string): boolean {
+  const segments = path.relative(absoluteRoot, directory).split(path.sep).map((segment) => segment.toLowerCase());
+  const routeStart = segments[0] === "src" ? 1 : 0;
+  return ROUTE_DIRECTORIES.has(segments[routeStart] ?? "");
+}
+
+/**
+ * Without following a link its target type is unknown, so a link is assumed relevant unless its
+ * name is clearly not scanned: an env file, an excluded directory, a type declaration, or a
+ * known non-source extension. Directory names often contain dots (`api.v2`, `[...slug]`), so
+ * "has an extension" alone is not enough to treat a link as an ignorable file.
+ */
+function couldBeScanned(name: string, parent: string, absoluteRoot: string): boolean {
+  const lower = name.toLowerCase();
+  if (isEnvFile(lower)) return false;
+  if (isSourceFile(name)) return true;
+  if (isExcludedDirectory(name, parent, absoluteRoot)) return false;
+  if (DECLARATION_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return false;
+  return !NON_SOURCE_EXTENSIONS.has(path.extname(lower));
+}
+
+const NON_SOURCE_EXTENSIONS = new Set([
+  // images, fonts, media
+  ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp", ".tif", ".tiff",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".wav", ".webm", ".ogg", ".mov", ".pdf",
+  // documents, styles, data
+  ".md", ".mdx", ".txt", ".css", ".scss", ".sass", ".less", ".json", ".yml", ".yaml", ".toml",
+  ".xml", ".csv", ".html", ".map", ".lock", ".log",
+  // archives
+  ".zip", ".gz", ".tgz", ".tar",
+]);
 
 function isSourceFile(name: string): boolean {
   const lower = name.toLowerCase();

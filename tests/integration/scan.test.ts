@@ -34,7 +34,33 @@ describe("fixture: next-app-router (healthy)", () => {
   });
 });
 
+describe("dynamic access is always visible (Option B: reported, not a strict failure)", () => {
+  test("terminal and JSON report the ENV006 count; --strict still passes on it alone", async () => {
+    fixture = await copyFixture("next-app-router");
+    await writeFile(path.join(fixture.root, "lib", "dynamic.ts"), "export const read = (key: string) => process.env[key];\n");
+    const { runCli } = await import("../helpers.js");
+
+    const terminal = await runCli(["scan", "--strict"], fixture.root);
+    expect(terminal.exitCode).toBe(0);
+    expect(terminal.stdout).toContain("Dynamic process.env access in 1 place (ENV006): variables read there were not checked.");
+
+    const json = await runCli(["scan", "--format", "json", "--strict"], fixture.root);
+    expect(JSON.parse(json.stdout).summary).toMatchObject({ dynamicAccesses: 1, complete: true, exitCode: 0 });
+  });
+});
+
 describe("incomplete scans", () => {
+  test("a stop at a resource limit says 'at least', not an exact count", async () => {
+    const { formatTerminal } = await import("../../apps/cli/src/formatters/terminal.js");
+    const output = formatTerminal(
+      { diagnostics: [], filesScanned: 3, skipped: [{ path: "z.ts", reason: "limit-reached" }], complete: false },
+      { errors: 0, warnings: 0, infos: 0 },
+      false,
+      0,
+    );
+    expect(output).toContain("scanning stopped at a limit, so at least 1 path (listed above) and possibly many more were not scanned");
+  });
+
   test("a skipped path makes the scan incomplete in every format, and --strict fails on it", async () => {
     fixture = await copyFixture("next-app-router");
     await writeFile(path.join(fixture.root, "lib", "huge.ts"), `${"//".padEnd(1_100_000, "x")}\n`);

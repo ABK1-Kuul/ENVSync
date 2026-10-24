@@ -1,5 +1,6 @@
 import type { Diagnostic, ScanResult, SeverityCounts } from "@envsync-internal/core";
 import { sanitizeForOutput } from "./sanitize.js";
+import { countDynamicAccesses } from "./summary.js";
 
 /**
  * Plain-text output. Severity is always spelled out, so nothing depends on color,
@@ -31,7 +32,17 @@ export function formatTerminal(result: ScanResult, counts: SeverityCounts, stric
   }
   if (!result.complete) {
     // A clean result must not look complete when some paths were never read.
-    lines.push(`Scan incomplete: ${plural(result.skipped.length, "path")} not scanned (listed above), so findings may be missing.`);
+    const stoppedAtLimit = result.skipped.some((entry) => entry.reason === "limit-reached");
+    lines.push(
+      stoppedAtLimit
+        ? `Scan incomplete: scanning stopped at a limit, so at least ${plural(result.skipped.length, "path")} (listed above) and possibly many more were not scanned; findings may be missing.`
+        : `Scan incomplete: ${plural(result.skipped.length, "path")} not scanned (listed above), so findings may be missing.`,
+    );
+  }
+  const dynamic = countDynamicAccesses(result.diagnostics);
+  if (dynamic > 0) {
+    // Not a failure (a limit of static analysis), but never hidden: those reads were not checked.
+    lines.push(`Dynamic process.env access in ${plural(dynamic, "place")} (ENV006): variables read there were not checked.`);
   }
   if (strict && counts.errors === 0 && exitCode !== 0) {
     if (counts.warnings > 0) lines.push("Strict mode: warnings cause a non-zero exit code.");
