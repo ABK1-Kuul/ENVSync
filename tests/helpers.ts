@@ -1,4 +1,4 @@
-import { cp, mkdtemp, rename, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,18 @@ export async function copyFixture(name: string): Promise<FixtureCopy> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return { root, cleanup: () => rm(workspace, { recursive: true, force: true }) };
+}
+
+/**
+ * Creates the smallest `.git` directory git (and EnvSync) accept as a repository: `HEAD` naming a
+ * ref, plus `objects/` and `refs/`. An empty `.git` folder is not a repository.
+ */
+export async function makeMinimalGitDirectory(root: string): Promise<string> {
+  const gitDirectory = path.join(root, ".git");
+  await mkdir(path.join(gitDirectory, "objects"), { recursive: true });
+  await mkdir(path.join(gitDirectory, "refs"), { recursive: true });
+  await writeFile(path.join(gitDirectory, "HEAD"), "ref: refs/heads/main\n");
+  return gitDirectory;
 }
 
 export type CliRun = { exitCode: number; stdout: string; stderr: string };

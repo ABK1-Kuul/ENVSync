@@ -4,7 +4,7 @@ import path from "node:path";
 import { runDoctor } from "@envsync-internal/core";
 import { nextFramework } from "@envsync-internal/parser-next";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { copyFixture, FAKE_SECRET, runCli, type FixtureCopy } from "../helpers.js";
+import { copyFixture, FAKE_SECRET, makeMinimalGitDirectory, runCli, type FixtureCopy } from "../helpers.js";
 
 // Tests may use git as a reference tool; product code never runs it.
 const hasGit = (() => {
@@ -33,10 +33,10 @@ type DoctorJson = {
   checks: { id: string; status: string; message: string; suggestion?: string }[];
 };
 
-/** Copies the healthy fixture into a fake git repository with a typical Next.js .gitignore. */
+/** Copies the healthy fixture into a minimal (valid) git repository with a typical Next.js .gitignore. */
 async function healthyRepo(gitignore = ".env*.local\nnode_modules/\n"): Promise<string> {
   fixture = await copyFixture("next-app-router");
-  await mkdir(path.join(fixture.root, ".git"));
+  await makeMinimalGitDirectory(fixture.root);
   await writeFile(path.join(fixture.root, ".gitignore"), gitignore);
   return fixture.root;
 }
@@ -85,7 +85,7 @@ describe("envsync doctor", () => {
     const root = await healthyRepo();
     const run = await runCli(["doctor"], root);
     expect(run.exitCode).toBe(0);
-    expect(run.stdout).toMatch(/^PASS {2}node-version: Node\.js /m);
+    expect(run.stdout).toMatch(/^PASS +node-version: Node\.js /m);
     expect(run.stdout).toContain("Doctor: 0 failures, 0 warnings, 7 passed.");
   });
 
@@ -99,7 +99,7 @@ describe("envsync doctor", () => {
     const terminal = await runCli(["doctor"], root);
 
     const touched = [...vi.mocked(readFile).mock.calls, ...vi.mocked(open).mock.calls].map((call) => path.basename(String(call[0])));
-    expect(touched.filter((name) => /^\.env(?!\.example$)/.test(name))).toEqual([]);
+    expect(touched.filter((name) => /^\.env(?!\.example$)/i.test(name))).toEqual([]);
     expect(json.stdout + json.stderr + terminal.stdout + terminal.stderr).not.toContain(FAKE_SECRET);
   });
 
@@ -169,13 +169,41 @@ describe("envsync doctor", () => {
     expect((await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored")?.status).toBe("pass");
   });
 
-  test("when the git index cannot be read, an ignored env file is a warning, not a pass", async () => {
+  test("when the git index cannot be read, an ignored env file is unknown, never a pass; --strict fails on it", async () => {
     const root = await healthyRepo();
     await mkdir(path.join(root, ".git", "index")); // not a regular file
     await writeFile(path.join(root, ".env.local"), "X=\n");
-    const check = (await doctor(root)).json.checks.find((c) => c.id === "env-files-ignored");
-    expect(check?.status).toBe("warn");
-    expect(check?.message).toContain("was not checked");
+    const run = await doctor(root);
+    const check = run.json.checks.find((c) => c.id === "env-files-ignored");
+    expect(check?.status).toBe("unknown");
+    expect(check?.message).toContain("Could not verify that .env.local is ignored and untracked by git: the git index is not a regular file");
+    expect(run.exitCode).toBe(0);
+    expect(run.json.summary).toMatchObject({ unknown: 1, strict: false });
+
+    const strict = await runCli(["doctor", "--strict"], root);
+    expect(strict.exitCode).toBe(1);
+    expect(strict.stdout).toMatch(/^UNKNOWN +env-files-ignored:/m);
+    expect(strict.stdout).toContain("Strict mode: warnings and unknown results cause a non-zero exit code.");
+  });
+
+  test("an oversized nested .gitignore that git honours is never treated as 'ignored'", async () => {
+    fixture = await copyFixture("next-app-router");
+    const repo = path.dirname(fixture.root);
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".gitignore"), ".env*.local\n");
+    // The negation that git applies lies beyond EnvSync's 1 MB limit.
+    await writeFile(path.join(fixture.root, ".gitignore"), `${"# padding\n".repeat(110_000)}!.env.local\n`);
+    await writeFile(path.join(fixture.root, ".env.local"), "X=\n");
+
+    const run = await doctor(fixture.root);
+    const check = run.json.checks.find((c) => c.id === "env-files-ignored");
+    expect(check?.status).toBe("unknown");
+    expect(check?.message).toContain(".gitignore is larger than EnvSync's 1 MB limit");
+  });
+
+  test("--strict passes a fully verified setup", async () => {
+    const root = await healthyRepo();
+    expect((await runCli(["doctor", "--strict"], root)).exitCode).toBe(0);
   });
 
   test("a hostile .gitignore cannot crash or hang doctor", async () => {

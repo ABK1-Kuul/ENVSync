@@ -178,6 +178,17 @@ describe("discoverSourceFiles", () => {
     expect(error).toMatchObject({ code: "ROOT_NOT_DIRECTORY" });
   });
 
+  test("stops at the entry limit, records it once, and is deterministic", async () => {
+    await writeTree(root, { "a.ts": "", "b.ts": "", "c/d.ts": "", "c/e.ts": "", "f.ts": "" });
+
+    // Root entries in sorted order: a.ts, b.ts, c/, f.ts. The 4th entry hits a limit of 3.
+    const first = await discoverSourceFiles(root, 3);
+    expect(first).toEqual({ files: ["a.ts", "b.ts"], skipped: [{ path: "f.ts", reason: "limit-reached" }] });
+    expect(await discoverSourceFiles(root, 3)).toEqual(first);
+
+    expect((await discoverSourceFiles(root, 100)).skipped).toEqual([]);
+  });
+
   test("produces identical output across runs", async () => {
     await writeTree(root, { "b.ts": "", "a.ts": "", "C.ts": "", "dir/z.js": "", "dir/a.js": "" });
 

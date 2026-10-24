@@ -40,7 +40,7 @@ describe("argument handling", () => {
     [["deploy"], "Unknown command `deploy`"],
     [["scan", "--write"], "`--write` is not an option of `scan`"],
     [["init", "--format", "json"], "`--format` is not an option of `init`"],
-    [["doctor", "--strict"], "`--strict` is not an option of `doctor`"],
+    [["doctor", "--write"], "`--write` is not an option of `doctor`"],
     [["scan", "--format", "xml"], "Unknown format `xml`"],
     [["scan", "--bogus"], "--bogus"],
     [["scan", "a", "b"], "at most one directory"],
@@ -67,14 +67,17 @@ describe("argument handling", () => {
 
 describe("exit codes", () => {
   test.each([
-    [{ errors: 0, warnings: 0, infos: 3 }, false, 0],
-    [{ errors: 0, warnings: 2, infos: 0 }, false, 0],
-    [{ errors: 0, warnings: 2, infos: 0 }, true, 1],
-    [{ errors: 1, warnings: 0, infos: 0 }, false, 1],
-    [{ errors: 1, warnings: 0, infos: 0 }, true, 1],
-    [{ errors: 0, warnings: 0, infos: 5 }, true, 0],
-  ])("%j strict=%s -> %i", (counts, strict, expected) => {
-    expect(exitCodeFor(counts, strict)).toBe(expected);
+    [{ errors: 0, warnings: 0, infos: 3 }, false, true, 0],
+    [{ errors: 0, warnings: 2, infos: 0 }, false, true, 0],
+    [{ errors: 0, warnings: 2, infos: 0 }, true, true, 1],
+    [{ errors: 1, warnings: 0, infos: 0 }, false, true, 1],
+    [{ errors: 1, warnings: 0, infos: 0 }, true, true, 1],
+    [{ errors: 0, warnings: 0, infos: 5 }, true, true, 0],
+    // Incomplete scans: reported without --strict, fatal with it.
+    [{ errors: 0, warnings: 0, infos: 0 }, false, false, 0],
+    [{ errors: 0, warnings: 0, infos: 0 }, true, false, 1],
+  ])("%j strict=%s complete=%s -> %i", (counts, strict, complete, expected) => {
+    expect(exitCodeFor(counts, strict, complete)).toBe(expected);
   });
 });
 

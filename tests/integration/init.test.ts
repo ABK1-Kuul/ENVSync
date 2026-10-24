@@ -100,7 +100,9 @@ describe("envsync init --write", () => {
     expect(await readFile(path.join(root, CONFIG), "utf8")).toBe(configBefore);
     const exampleAfter = await readFile(path.join(root, EXAMPLE), "utf8");
     expect(exampleAfter.startsWith(exampleBefore)).toBe(true);
-    expect(exampleAfter.slice(exampleBefore.length)).toBe("# Added by `envsync init`\nSTRIPE_KEY=\nUNUSED_FLAG=\n");
+    // init keeps the file's own line endings, so build the expectation from them (checkout-independent).
+    const eol = exampleBefore.includes("\r\n") ? "\r\n" : "\n";
+    expect(exampleAfter.slice(exampleBefore.length)).toBe(["# Added by `envsync init`", "STRIPE_KEY=", "UNUSED_FLAG=", ""].join(eol));
   });
 
   test("preserves CRLF line endings when appending", async () => {
@@ -215,19 +217,37 @@ describe("envsync init: refuses changes that would not be safe or would not stic
     expect(run.stdout).toContain("Note: API_URL and api_url differ only by letter case");
   });
 
-  test("a hard-linked .env.example is refused, so a file outside the project cannot be appended to", async () => {
+  test("a hard-linked .env.example is blocked in the preview, and --write changes nothing at all", async () => {
     fixture = await copyFixture("next-pages-router");
     const root = fixture.root;
     const outside = path.join(path.dirname(root), "outside.env");
     await writeFile(outside, await readFile(path.join(root, EXAMPLE)));
     await rm(path.join(root, EXAMPLE));
     await link(outside, path.join(root, EXAMPLE));
+    await rm(path.join(root, CONFIG)); // so the plan also wants to create the config
     const outsideBefore = await readFile(outside, "utf8");
+    const before = await snapshot(root);
+
+    const preview = await runCli(["init"], root);
+    expect(preview.stdout).toContain(`Cannot update ${EXAMPLE}: the file has more than one hard link`);
+    expect(preview.stdout).not.toContain("Run `envsync init --write` to apply");
 
     const run = await runCli(["init", "--write"], root);
     expect(run.exitCode).toBe(2);
-    expect(run.stderr).toContain("has more than one hard link");
+    expect(run.stderr).toContain("No files were changed.");
+    expect(await snapshot(root)).toEqual(before); // the config was not created either
     expect(await readFile(outside, "utf8")).toBe(outsideBefore);
+  });
+
+  test("a .env.example hard-linked after planning is caught by preflight before the config is created", async () => {
+    fixture = await copyFixture("next-pages-router");
+    const root = fixture.root;
+    await rm(path.join(root, CONFIG));
+    const plan = await planInit({ root, framework: nextFramework });
+    await link(path.join(root, EXAMPLE), path.join(path.dirname(root), "second-name.env"));
+
+    await expect(applyInitPlan(root, plan)).rejects.toMatchObject({ code: "FILE_CHANGED" });
+    await expect(readFile(path.join(root, CONFIG))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("a .env.example swapped for a symlink after planning is refused", async (context) => {

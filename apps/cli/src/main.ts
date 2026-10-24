@@ -37,7 +37,7 @@ type Format = (typeof FORMATS)[number];
 const COMMAND_OPTIONS = {
   scan: ["format", "strict"],
   init: ["write"],
-  doctor: ["format"],
+  doctor: ["format", "strict"],
 } as const;
 type Command = keyof typeof COMMAND_OPTIONS;
 
@@ -46,28 +46,34 @@ const HELP = `EnvSync - keep environment configuration in sync with your code.
 Usage:
   envsync scan [directory] [--format terminal|json] [--strict]
   envsync init [directory] [--write]
-  envsync doctor [directory] [--format terminal|json]
+  envsync doctor [directory] [--format terminal|json] [--strict]
 
 Commands:
   scan     Compare process.env references, envsync.config.ts and .env.example.
   init     Preview a starter envsync.config.ts and .env.example placeholders.
-           Nothing is written unless you pass --write. Existing files are never
-           overwritten; .env.example only gains appended placeholder lines.
-  doctor   Check the local setup: config, .env.example, package.json and
-           whether local .env files are ignored by git.
+           Nothing is written unless you pass --write, which plans again and
+           applies that plan. Existing files are never overwritten;
+           .env.example only gains appended placeholder lines.
+  doctor   Check the local setup: config, .env.example, package.json, and
+           whether local .env files are ignored by git and not already tracked.
+           Results that cannot be established are reported as "unknown".
 
 Options:
   --format   Output format for scan and doctor: terminal (default) or json.
-  --strict   scan: treat warnings as failures.
-  --write    init: apply the previewed changes.
+  --strict   scan: warnings and incomplete scans fail.
+             doctor: warnings and unknown results fail.
+  --write    init: apply the planned changes.
   -h, --help     Show this help.
   -v, --version  Show the version.
 
 Exit codes:
-  0  Success: no errors (scan, and no warnings with --strict); no failed checks (doctor).
-  1  scan found errors (or warnings with --strict); doctor found a failed check.
+  0  Success. scan: no errors (with --strict: no warnings, and every file scanned).
+     doctor: no failed checks (with --strict: no warnings or unknown results).
+  1  scan found errors (or, with --strict, warnings or skipped files); doctor found a
+     failed check (or, with --strict, a warning or unknown result).
   2  Usage error, or the command could not run (for example, missing envsync.config.ts
-     for scan, or a file that changed between the init preview and --write).
+     for scan; for init --write, a file that changed between planning and writing, a
+     blocked change, or a failed write).
 
 EnvSync never prints environment-variable values, never reads .env files (doctor
 checks only their names), never executes project code and makes no network requests.
@@ -124,7 +130,7 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
       case "init":
         return await runInit(io, root, values.write ?? false);
       case "doctor":
-        return await runDoctorCommand(io, root, format);
+        return await runDoctorCommand(io, root, format, values.strict ?? false);
     }
   } catch (error) {
     if (error instanceof ScanError || error instanceof DiscoveryError || error instanceof InitError) {
@@ -139,7 +145,7 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
 async function runScan(io: CliIO, root: string, format: Format, strict: boolean): Promise<number> {
   const result = await scanProject({ root, framework: nextFramework });
   const counts = countBySeverity(result.diagnostics);
-  const exitCode = exitCodeFor(counts, strict);
+  const exitCode = exitCodeFor(counts, strict, result.complete);
   io.stdout(format === "json" ? formatJson(result, counts, strict, exitCode) : formatTerminal(result, counts, strict, exitCode));
   return exitCode;
 }
@@ -151,11 +157,11 @@ async function runInit(io: CliIO, root: string, write: boolean): Promise<number>
   return EXIT_OK;
 }
 
-async function runDoctorCommand(io: CliIO, root: string, format: Format): Promise<number> {
+async function runDoctorCommand(io: CliIO, root: string, format: Format, strict: boolean): Promise<number> {
   const checks = [nodeVersionCheck(io.nodeVersion ?? process.versions.node), ...(await runDoctor({ root, framework: nextFramework }))];
   const counts = countChecks(checks);
-  const exitCode = counts.fail > 0 ? EXIT_FINDINGS : EXIT_OK;
-  io.stdout(format === "json" ? formatDoctorJson(checks, counts, exitCode) : formatDoctorTerminal(checks, counts));
+  const exitCode = counts.fail > 0 || (strict && counts.warn + counts.unknown > 0) ? EXIT_FINDINGS : EXIT_OK;
+  io.stdout(format === "json" ? formatDoctorJson(checks, counts, strict, exitCode) : formatDoctorTerminal(checks, counts, strict));
   return exitCode;
 }
 

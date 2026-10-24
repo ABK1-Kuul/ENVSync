@@ -31,6 +31,11 @@ export function formatInitPlan(plan: InitPlan, written: readonly string[] | null
       `Note: ${plan.dynamicAccessCount} dynamic process.env ${plan.dynamicAccessCount === 1 ? "access" : "accesses"} could not be resolved to names; declare those variables by hand.`,
     );
   }
+  if (plan.notScanned > 0) {
+    lines.push(
+      `Note: ${plan.notScanned} ${plan.notScanned === 1 ? "path was" : "paths were"} not scanned (run \`envsync scan\` to list them), so some variables may be missing from this plan.`,
+    );
+  }
   if (plan.skippedNames.length > 0) {
     lines.push(`Note: ${plan.skippedNames.length} referenced name(s) are not valid variable names and were left out.`);
   }

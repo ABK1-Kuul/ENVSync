@@ -65,20 +65,25 @@ jobs:
       # The publishable artifact, staged outside the checkout: exactly five files, one bundled
       # script whose only non-builtin import is typescript, and no internal package names.
       - name: Stage, pack and check the publishable CLI
+        # On Windows, RUNNER_TEMP is a drive path (D:\a\_temp). GNU tar in Git Bash reads "D:" as a
+        # remote host, so after staging everything below uses paths relative to RUNNER_TEMP.
+        # Sorting uses LC_ALL=C so the file-list comparison does not depend on the runner locale.
         run: |
-          stage="$RUNNER_TEMP/envsync-stage"
-          node apps/cli/scripts/stage.mjs --out "$stage"
-          npm pack "$stage" --pack-destination "$RUNNER_TEMP" --ignore-scripts
-          tarball=$(ls "$RUNNER_TEMP"/envsync-*.tgz)
-          tar -tzf "$tarball" | sort > "$RUNNER_TEMP/contents.txt"
-          printf '%s\n' package/CHANGELOG.md package/LICENSE package/README.md package/dist/envsync.js package/package.json > "$RUNNER_TEMP/expected.txt"
-          diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/contents.txt"
+          workspace="$PWD"
+          node apps/cli/scripts/stage.mjs --out "$RUNNER_TEMP/envsync-stage"
+          cd "$RUNNER_TEMP"
+          npm pack ./envsync-stage --pack-destination . --ignore-scripts
+          tarball=$(ls envsync-*.tgz)
+          tar -tzf "$tarball" | LC_ALL=C sort > contents.txt
+          printf '%s\n' package/CHANGELOG.md package/LICENSE package/README.md package/dist/envsync.js package/package.json | LC_ALL=C sort > expected.txt
+          diff expected.txt contents.txt
           # Code and manifest only: the CHANGELOG legitimately mentions the internal scope.
           if tar -xzOf "$tarball" package/dist/envsync.js package/package.json | grep -q '@envsync-internal'; then echo "internal package name leaked into the package"; exit 1; fi
           # Install the tarball like a user would, in a fresh project outside the checkout.
-          consumer="$RUNNER_TEMP/consumer"
-          mkdir "$consumer"
-          (cd "$consumer" && npm init --yes > /dev/null && npm install --ignore-scripts --no-audit --no-fund "$tarball")
-          (cd "$consumer" && npx --no-install envsync --version)
-          (cd "$consumer" && npx --no-install envsync scan "$GITHUB_WORKSPACE/tests/fixtures/next-pages-router" --format json > /dev/null) || test $? -eq 1
+          mkdir consumer
+          cd consumer
+          npm init --yes > /dev/null
+          npm install --ignore-scripts --no-audit --no-fund "../$tarball"
+          npx --no-install envsync --version
+          npx --no-install envsync scan "$workspace/tests/fixtures/next-pages-router" --format json > /dev/null || test $? -eq 1
         shell: bash

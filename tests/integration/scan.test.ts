@@ -17,7 +17,7 @@ describe("fixture: next-app-router (healthy)", () => {
   test("produces no diagnostics", async () => {
     fixture = await copyFixture("next-app-router");
     const result = await scan(fixture.root);
-    expect(result).toEqual({ diagnostics: [], filesScanned: 4, skipped: [] });
+    expect(result).toEqual({ diagnostics: [], filesScanned: 4, skipped: [], complete: true });
   });
 
   test("ignores references in excluded directories and generated files", async () => {
@@ -31,6 +31,30 @@ describe("fixture: next-app-router (healthy)", () => {
     const result = await scan(fixture.root);
     expect(result.diagnostics).toEqual([]);
     expect(result.filesScanned).toBe(4);
+  });
+});
+
+describe("incomplete scans", () => {
+  test("a skipped path makes the scan incomplete in every format, and --strict fails on it", async () => {
+    fixture = await copyFixture("next-app-router");
+    await writeFile(path.join(fixture.root, "lib", "huge.ts"), `${"//".padEnd(1_100_000, "x")}\n`);
+    const { runCli } = await import("../helpers.js");
+
+    const terminal = await runCli(["scan"], fixture.root);
+    expect(terminal.exitCode).toBe(0);
+    expect(terminal.stdout).toContain("No issues found in 4 files.");
+    expect(terminal.stdout).toContain("Scan incomplete: 1 path not scanned (listed above), so findings may be missing.");
+
+    const json = await runCli(["scan", "--format", "json", "--strict"], fixture.root);
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.stdout).summary).toMatchObject({ complete: false, errors: 0, warnings: 0, strict: true, exitCode: 1 });
+
+    const strict = await runCli(["scan", "--strict"], fixture.root);
+    expect(strict.exitCode).toBe(1);
+    expect(strict.stdout).toContain("Strict mode: an incomplete scan causes a non-zero exit code.");
+
+    const init = await runCli(["init"], fixture.root);
+    expect(init.stdout).toContain("1 path was not scanned");
   });
 });
 

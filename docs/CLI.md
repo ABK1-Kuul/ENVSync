@@ -77,11 +77,15 @@ Safety guarantees:
 ## `envsync doctor`
 
 ```
-envsync doctor [directory] [--format terminal|json]
+envsync doctor [directory] [--format terminal|json] [--strict]
 ```
 
 Read-only checks of the local setup. It never runs package scripts, never runs `git`, and never
 reads the contents of `.env`/`.env.*` files (it lists their names only).
+
+Each check reports `pass`, `warn`, `fail`, `skip` (not applicable) or **`unknown`**: EnvSync could
+not establish the result, so it is treated as unverified, never as a pass. With `--strict`, `warn`
+and `unknown` also cause exit code 1.
 
 | Check id | Fails when | Warns when |
 |---|---|---|
@@ -91,32 +95,38 @@ reads the contents of `.env`/`.env.*` files (it lists their names only).
 | `framework` | | `next` is not a dependency (with a monorepo hint at workspace roots); version ranges are never printed |
 | `config` | `envsync.config.ts` is missing or has problems | |
 | `env-example` | `.env.example` is symlinked or oversized | it is missing, or has lines that are not `KEY=value` (reported by line number only) |
-| `env-files-ignored` | a `.env*.local` file is tracked by git (committed), or exists and is not ignored | a shared `.env`/`.env.<mode>` file is committed or not ignored; `.env.local` would not be ignored if created; or the git index could not be read, so tracking was not checked |
+| `env-files-ignored` | a `.env*.local` file is tracked by git (committed), or exists and is definitely not ignored | a shared `.env`/`.env.<mode>` file is committed or not ignored, or `.env.local` would not be ignored if created. **Unknown** when ignore or tracking status could not be established (see below). |
 
 `env-files-ignored` reports `skip` outside a git repository. `.local` matching is case-insensitive.
 
 How the git checks work without running git:
+- **Repository root.** A `.git` directory counts only if git would accept it: `HEAD` naming a ref
+  or object, plus `objects/` and `refs/`. Otherwise the search continues upward, as git's does, so
+  a planted `.git` folder cannot supply its own ignore rules. A `.git` *file* (linked worktree or
+  submodule) makes the result `unknown`, because its metadata lives elsewhere.
 - **Tracked files** are read from `.git/index` (versions 2–4; file names only). An already
-  committed file stays tracked even if `.gitignore` lists it, so this is checked first. If the
-  index cannot be read (for example in a linked worktree, where `.git` is a file), the check
-  warns instead of passing.
+  committed file stays tracked even if `.gitignore` lists it, so this is checked first. The
+  result is `unknown` when the index cannot be read, uses a split index (`link`) or sparse index
+  (`sdir` or directory entries), is malformed, or exceeds the limits below.
 - **Ignore rules** come from `.gitignore` files between the project and the repository root plus
-  `.git/info/exclude`, evaluated with git's own rules: LF line splitting, only trailing ASCII
-  spaces trimmed, wildmatch globbing where `*`, `?` and `[...]` never match `/`, invalid patterns
-  matching nothing, and `core.ignorecase` from `.git/config`. Matching runs in linear time, so a
-  hostile `.gitignore` cannot hang `doctor`; files beyond 10,000 rules or 4,096-character
-  patterns are cut off and the message says so. The behaviour is tested against `git
-  check-ignore`.
-- Not checked: the global excludes file (`core.excludesFile`).
+  `.git/info/exclude`, evaluated like git: LF line splitting, only trailing ASCII spaces trimmed,
+  byte-wise wildmatch where `*`, `?` and `[...]` never match `/`, invalid patterns matching
+  nothing, and `core.ignorecase` (ASCII letters only) from `.git/config`. Matching runs in linear
+  time, so a hostile `.gitignore` cannot hang `doctor`. If an ignore file that applies is
+  oversized, unreadable, symlinked, or exceeds 10,000 rules / 4,096-character patterns, the
+  result is `unknown`, never `ignored`. Behaviour is tested against `git check-ignore`.
+- Known deviations from git: the global excludes file (`core.excludesFile`) is not read; git's
+  literal-prefix handling makes a pattern like `apps**/.env.local` also match across directories,
+  which EnvSync does not (it errs towards "not ignored").
 
-JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "skip", "exitCode" }, "checks": [{ "id", "status", "message", "suggestion"? }] }`.
+JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "unknown", "skip", "strict", "exitCode" }, "checks": [{ "id", "status", "message", "suggestion"? }] }`.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | `scan`: no errors (with `--strict`, also no warnings; info never counts). `init`: preview shown or changes written. `doctor`: no failed checks. |
-| `1` | `scan`: at least one error, or (with `--strict`) at least one warning. `doctor`: at least one failed check. |
+| `0` | `scan`: no errors (with `--strict`, also no warnings and a complete scan; info never counts). `init`: preview shown or changes written. `doctor`: no failed checks (with `--strict`, also no `warn` or `unknown`). |
+| `1` | `scan`: at least one error, or (with `--strict`) at least one warning or any path not scanned. `doctor`: at least one failed check, or (with `--strict`) a `warn` or `unknown` result. |
 | `2` | Usage error (including an option that does not belong to the command), or the command could not run. For `scan` and `init`: missing or unreadable project directory, a config or `.env.example` that is a symlink / not a regular file / over 1 MB; for `scan`, a missing `envsync.config.ts`; for `init --write`, a file that changed between planning and writing, a blocked change, or a failed write. The reason is printed to stderr. (`doctor` reports a missing directory as a failed check, exit 1.) |
 
 ## Config file: `envsync.config.ts`
@@ -224,17 +234,22 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
   newlines inside a name are escaped too, so they cannot forge extra lines.
 - Config syntax errors are reported by TypeScript diagnostic code only (for example
   `has a syntax error (TS1005).`), never with TypeScript's message text, which can quote source.
+- `summary.complete` is `false` whenever `skipped` is non-empty: findings may then be incomplete,
+  and `--strict` exits 1 even with no diagnostics. Terminal output says "Scan incomplete".
+- Messages are for humans; automation should rely on `code`, `severity` and location fields.
 
 ## Resource limits
 
+Hitting any limit is always disclosed and never reported as a clean, complete result.
+
 | Limit | Value | When exceeded |
 |---|---|---|
-| Size of any single file read | 1,000,000 bytes | source files are skipped (`too-large`); config/`.env.example` stop the command (exit 2) |
-| Source files per scan | 20,000 | remaining files are skipped and listed once as `limit-reached` |
+| Size of any single file read | 1,000,000 bytes | source files are skipped (`too-large`); config/`.env.example` stop the command (exit 2); an ignore file makes `doctor`'s result `unknown` |
+| Directory entries visited by discovery | 200,000 | listing stops; recorded once as `limit-reached` |
+| Source files per scan | 20,000 | remaining files are skipped; recorded once as `limit-reached` |
 | Total source bytes per scan | 200,000,000 | as above |
-| `.gitignore` rules per file / pattern length | 10,000 / 4,096 characters | extra rules are not evaluated; `doctor` says so |
-| `.git/index` size | 256 MiB | tracking is reported as not checked (warning) |
-- Messages are for humans; automation should rely on `code`, `severity` and location fields.
+| `.gitignore` rules per file / pattern length | 10,000 / 4,096 characters | `doctor`'s result is `unknown` for paths those rules apply to |
+| `.git/index` size / one path / all decoded paths | 256 MiB / 4,096 bytes / 64 MiB | tracking status is `unknown` |
 
 ## Known limitations
 
@@ -247,5 +262,7 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 - `type` and `description` are validated but not yet used.
 - `scan` reports any string used as a `process.env["..."]` key as `variableName`, even if it is not
   a valid variable name.
-- `doctor` does not read the global git excludes file.
+- `doctor` does not read the global git excludes file (see "Known deviations from git" above).
+- A process that swaps a project directory for a symlink *while* a command runs is not detected
+  (file swaps are). This requires concurrent write access to the project.
 - Linting is not configured in this repository yet.

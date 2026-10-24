@@ -33,7 +33,8 @@ export class DiscoveryError extends Error {
 export type SkippedEntry = {
   /** Root-relative path using `/` separators. */
   path: string;
-  reason: "symlink" | "unreadable";
+  /** `limit-reached`: listing stopped here because the entry limit was hit (recorded once). */
+  reason: "symlink" | "unreadable" | "limit-reached";
 };
 
 export type DiscoveryResult = {
@@ -43,16 +44,20 @@ export type DiscoveryResult = {
   skipped: SkippedEntry[];
 };
 
+/** Bounds work on hostile or enormous trees; documented in docs/CLI.md ("Resource limits"). */
+export const MAX_DISCOVERY_ENTRIES = 200_000;
+
 /** Lists source files under `root` that are eligible for static env-reference analysis. */
-export async function discoverSourceFiles(root: string): Promise<DiscoveryResult> {
+export async function discoverSourceFiles(root: string, maxEntries = MAX_DISCOVERY_ENTRIES): Promise<DiscoveryResult> {
   const absoluteRoot = path.resolve(root);
   await assertDirectory(absoluteRoot);
 
   const files: string[] = [];
   const skipped: SkippedEntry[] = [];
   const pending: string[] = [absoluteRoot];
+  let visited = 0;
 
-  for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
+  traversal: for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -63,9 +68,15 @@ export async function discoverSourceFiles(root: string): Promise<DiscoveryResult
       skipped.push({ path: toRelative(absoluteRoot, directory), reason: "unreadable" });
       continue;
     }
+    // Sorted, so which entries fall within the limit does not depend on file-system order.
+    entries.sort((a, b) => compareCodeUnits(a.name, b.name));
 
     for (const entry of entries) {
       const entryPath = path.join(directory, entry.name);
+      if (++visited > maxEntries) {
+        skipped.push({ path: toRelative(absoluteRoot, entryPath), reason: "limit-reached" });
+        break traversal;
+      }
       if (entry.isSymbolicLink()) {
         skipped.push({ path: toRelative(absoluteRoot, entryPath), reason: "symlink" });
       } else if (entry.isDirectory()) {

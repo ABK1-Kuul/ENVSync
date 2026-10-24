@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseEnvExample } from "@envsync-internal/schema";
 import { discoverSourceFiles, DiscoveryError } from "./discovery.js";
 import type { FrameworkAdapter } from "./framework.js";
-import { isIgnoredFile, isTrackedFile, loadIgnoreContext } from "./gitignore.js";
+import { explainIgnoreStatus, isTrackedFile, loadIgnoreContext } from "./gitignore.js";
 import { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, readProjectFile, ScanError } from "./project-files.js";
 import { parseConfigSafely } from "./scan.js";
 
@@ -12,7 +12,11 @@ import { parseConfigSafely } from "./scan.js";
  * code, never runs git, and never reads the contents of `.env`/`.env.*` files (only their names).
  */
 
-export type DoctorStatus = "pass" | "warn" | "fail" | "skip";
+/**
+ * `unknown`: the check could not be established (unreadable or unsupported metadata, limits hit).
+ * It is never a pass; `doctor --strict` fails on it, like on `warn`.
+ */
+export type DoctorStatus = "pass" | "warn" | "fail" | "unknown" | "skip";
 
 /** `id` values are stable for JSON consumers. */
 export type DoctorCheck = { id: string; status: DoctorStatus; message: string; suggestion?: string };
@@ -193,57 +197,72 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
   // Next.js treats `.env*.local` as machine-local secrets; matching is case-insensitive because
   // Windows and macOS file systems are.
   const isLocal = (name: string) => name.toLowerCase().endsWith(".local");
-  const truncatedNote = context.truncated ? " Some ignore rules exceeded EnvSync's size limits and were not evaluated." : "";
+  const list = (names: readonly string[]) => names.join(", ");
+  const verb = (names: readonly string[], one: string, many: string) => (names.length === 1 ? one : many);
 
-  // An ignore rule does not untrack a committed file, so tracking is checked first.
-  const tracked = present.filter((name) => isTrackedFile(context, root, name) === true);
-  const trackedLocal = tracked.filter(isLocal);
+  // Every file gets an explicit verdict for both questions; `undefined`/"unknown" means "could not
+  // be established" and is never treated as safe.
+  const unknownReasons = new Set<string>();
+  const facts = present.map((name) => {
+    const ignore = explainIgnoreStatus(context, root, name);
+    for (const reason of ignore.reasons) unknownReasons.add(reason);
+    const tracked = isTrackedFile(context, root, name);
+    if (tracked === undefined && context.tracked.status !== "ok") unknownReasons.add(context.tracked.reason);
+    return { name, local: isLocal(name), tracked, ignore: ignore.status };
+  });
+
+  // 1. An ignore rule does not untrack a committed file, so tracking is checked first.
+  const trackedLocal = facts.filter((fact) => fact.local && fact.tracked === true).map((fact) => fact.name);
   if (trackedLocal.length > 0) {
     return {
       id: "env-files-ignored",
       status: "fail",
-      message: `${trackedLocal.join(", ")} ${trackedLocal.length === 1 ? "is" : "are"} tracked by git, so changes to ${trackedLocal.length === 1 ? "it" : "them"} will be committed even if .gitignore lists ${trackedLocal.length === 1 ? "it" : "them"}.`,
+      message: `${list(trackedLocal)} ${verb(trackedLocal, "is", "are")} tracked by git, so changes to ${verb(trackedLocal, "it", "them")} will be committed even if .gitignore lists ${verb(trackedLocal, "it", "them")}.`,
       suggestion:
         "Run `git rm --cached <file>` and commit, keep `.env*.local` in .gitignore, and rotate any secret that was ever committed.",
     };
   }
 
-  const exposedLocal = present.filter((name) => isLocal(name) && !tracked.includes(name) && !isIgnoredFile(context, root, name));
+  // 2. Definitely not ignored: committable regardless of anything else we could not verify.
+  const exposedLocal = facts.filter((fact) => fact.local && fact.ignore === "not-ignored").map((fact) => fact.name);
   if (exposedLocal.length > 0) {
     return {
       id: "env-files-ignored",
       status: "fail",
-      message: `${exposedLocal.join(", ")} ${exposedLocal.length === 1 ? "is" : "are"} not ignored by git, so local secrets could be committed.${truncatedNote}`,
+      message: `${list(exposedLocal)} ${verb(exposedLocal, "is", "are")} not ignored by git, so local secrets could be committed.`,
       suggestion: "Add `.env*.local` to .gitignore.",
     };
   }
 
-  const trackedOrExposedShared = present.filter((name) => !isLocal(name) && (tracked.includes(name) || !isIgnoredFile(context, root, name)));
-  if (trackedOrExposedShared.length > 0) {
+  const sharedExposed = facts.filter((fact) => !fact.local && (fact.tracked === true || fact.ignore === "not-ignored")).map((fact) => fact.name);
+  if (sharedExposed.length > 0) {
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: `${trackedOrExposedShared.join(", ")} ${trackedOrExposedShared.length === 1 ? "is" : "are"} committed or not ignored by git. Next.js allows committing these for non-secret defaults only.`,
+      message: `${list(sharedExposed)} ${verb(sharedExposed, "is", "are")} committed or not ignored by git. Next.js allows committing these for non-secret defaults only.`,
       suggestion: "Make sure they contain no secrets, or add them to .gitignore.",
     };
   }
 
-  if (!isIgnoredFile(context, root, ".env.local")) {
+  const probe = explainIgnoreStatus(context, root, ".env.local");
+  if (probe.status === "not-ignored") {
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: `.env.local would not be ignored by git if you created it.${truncatedNote}`,
+      message: ".env.local would not be ignored by git if you created it.",
       suggestion: "Add `.env*.local` to .gitignore before creating local env files.",
     };
   }
+  for (const reason of probe.reasons) unknownReasons.add(reason);
 
-  // Without the index, "ignored" alone could be a false assurance: a committed file stays tracked.
-  if (context.tracked.status !== "ok" && present.length > 0) {
+  // 3. Anything not established is reported as unknown, never as a pass.
+  if (unknownReasons.size > 0) {
+    const subject = present.length > 0 ? list(present) : ".env.local";
     return {
       id: "env-files-ignored",
-      status: "warn",
-      message: `${present.join(", ")} ${present.length === 1 ? "matches" : "match"} an ignore rule, but ${context.tracked.reason}, so whether ${present.length === 1 ? "it is" : "they are"} already committed was not checked.`,
-      suggestion: "Run `git ls-files .env*` to confirm no local env file is tracked.",
+      status: "unknown",
+      message: `Could not verify that ${subject} ${present.length > 1 ? "are" : "is"} ignored and untracked by git: ${[...unknownReasons].join("; ")}.`,
+      suggestion: "Check with `git check-ignore -v <file>` and `git ls-files <file>`.",
     };
   }
 
@@ -251,9 +270,9 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
     id: "env-files-ignored",
     status: "pass",
     message:
-      (present.length > 0
-        ? `Local env files are ignored by git and not tracked (${present.join(", ")}). Their contents were not read.`
-        : "No local env files found, and .env.local would be ignored by git.") + truncatedNote,
+      present.length > 0
+        ? `Local env files are ignored by git and not tracked (${list(present)}). Their contents were not read.`
+        : "No local env files found, and .env.local would be ignored by git.",
   };
 }
 

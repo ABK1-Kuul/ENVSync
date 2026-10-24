@@ -51,9 +51,8 @@ node apps/cli/dist/bin.js scan path/to/next-project
 Create an `envsync.config.ts` at the root of your Next.js project:
 
 ```ts
-import { defineConfig } from "envsync"; // optional import; parsed statically
-
-export default defineConfig({
+// No import needed: EnvSync reads this object as data (the envsync package exports no defineConfig).
+export default {
   variables: {
     // Required server-side secret
     DATABASE_URL: {
@@ -77,10 +76,10 @@ export default defineConfig({
       type: "string",
     },
   },
-});
+};
 ```
 
-*Note: `envsync.config.ts` is parsed statically and never executed. Supported fields include `required` (default `true`), `secret`, `type`, and `description`.*
+*Note: `envsync.config.ts` is parsed statically and never executed. Supported fields include `required` (default `true`), `secret`, `external`, `type`, and `description`.*
 
 ### 3. Ensure `.env.example` Contains Safe Placeholders
 

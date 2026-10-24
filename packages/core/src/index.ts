@@ -13,10 +13,10 @@ export type { DiscoveryErrorCode, DiscoveryResult, SkippedEntry } from "./discov
 export { runDoctor } from "./doctor.js";
 export type { DoctorCheck, DoctorOptions, DoctorStatus } from "./doctor.js";
 export { parseIndex, readTrackedPaths } from "./git-index.js";
-export type { TrackedPaths } from "./git-index.js";
+export type { ParsedIndex, TrackedPaths } from "./git-index.js";
 export type { ClientExposedName, ExtractedReference, FrameworkAdapter, Location } from "./framework.js";
-export { isIgnoredFile, isTrackedFile, loadIgnoreContext, parseGitConfig, parseIgnoreRules } from "./gitignore.js";
-export type { IgnoreContext, IgnoreContextOptions } from "./gitignore.js";
+export { explainIgnoreStatus, ignoreStatus, isIgnoredFile, isTrackedFile, loadIgnoreContext, parseGitConfig, parseIgnoreRules } from "./gitignore.js";
+export type { IgnoreContext, IgnoreContextOptions, IgnoreStatus } from "./gitignore.js";
 export { compileWildmatch, wildmatch } from "./wildmatch.js";
 export { applyInitPlan, InitError, planInit } from "./init.js";
 export type { FileChange, InitErrorCode, InitPlan } from "./init.js";

@@ -12,6 +12,8 @@ export function formatJson(result: ScanResult, counts: SeverityCounts, strict: b
       warnings: counts.warnings,
       infos: counts.infos,
       filesScanned: result.filesScanned,
+      // false when any path in `skipped` was not scanned: findings may be incomplete.
+      complete: result.complete,
       strict,
       exitCode,
     },
