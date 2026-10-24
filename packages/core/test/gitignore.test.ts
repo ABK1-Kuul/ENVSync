@@ -156,9 +156,8 @@ describe.skipIf(gitVersion === null)(`gitignore matching agrees with ${gitVersio
       { ".gitignore": "apps[/]web/.env.local\n" },
       { ".gitignore": "apps?web/.env.local\n" },
       { ".gitignore": "apps[!a]web/.env.local\n" },
-      // git's literal-prefix split: after "apps", `**/` starts the pattern and crosses directories.
-      { ".gitignore": "apps**/.env.local\n" },
-      { ".gitignore": "*.local\n!apps**/.env.local\n" },
+      // `**` after a literal prefix where older and newer git agree. (Cases where they disagree,
+      // like apps**/.env.local, are tested separately: the answer depends on the git version.)
       { ".gitignore": "*.local\n!app**/web/.env.local\n" },
       { ".gitignore": "*.local\n!apps/**/.env.local\n" },
       { ".gitignore": "apps/web**\n" },
@@ -381,7 +380,7 @@ describe("index parsing is conservative", () => {
     await makeMinimalGitDirectory(repo);
     await mkdir(path.join(repo, ".git", "index")); // a directory, not a file
     const context = await loadIgnoreContext(repo, { ceiling: workspace });
-    expect(context.repositoryRoot).toBe(repo);
+    expect(context.repositoryRoot).toBe(await realpath(repo));
     expect(context.tracked.status).toBe("unavailable");
     expect(isTrackedFile(context, repo, ".env.local")).toBeUndefined();
   });
@@ -397,17 +396,17 @@ describe("repository detection and incomplete rules", () => {
     await writeFile(path.join(project, ".git", "info", "exclude"), ".env*.local\n*\n");
 
     const context = await loadIgnoreContext(project, { ceiling: workspace });
-    expect(context.repositoryRoot).toBe(outer);
+    expect(context.repositoryRoot).toBe(await realpath(outer));
     expect(ignoreStatus(context, project, ".env.local")).toBe("not-ignored");
 
     // A valid-looking HEAD alone is not enough: git also requires objects/ and refs/.
     await writeFile(path.join(project, ".git", "HEAD"), "ref: refs/heads/main\n");
-    expect((await loadIgnoreContext(project, { ceiling: workspace })).repositoryRoot).toBe(outer);
+    expect((await loadIgnoreContext(project, { ceiling: workspace })).repositoryRoot).toBe(await realpath(outer));
 
     await writeFile(path.join(project, ".git", "HEAD"), "garbage\n");
     await mkdir(path.join(project, ".git", "objects"));
     await mkdir(path.join(project, ".git", "refs"));
-    expect((await loadIgnoreContext(project, { ceiling: workspace })).repositoryRoot).toBe(outer);
+    expect((await loadIgnoreContext(project, { ceiling: workspace })).repositoryRoot).toBe(await realpath(outer));
   });
 
   test.each([
@@ -419,7 +418,7 @@ describe("repository detection and incomplete rules", () => {
     const repo = path.join(workspace, "repo");
     await makeMinimalGitDirectory(repo);
     await writeFile(path.join(repo, ".git", "HEAD"), head);
-    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(repo);
+    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(await realpath(repo));
   });
 
   test("a .git that EnvSync cannot verify (a link) gives unknown, never 'not in a repository'", async () => {
@@ -504,7 +503,7 @@ describe("repository detection and incomplete rules", () => {
     const repo = path.join(workspace, "repo");
     await makeMinimalGitDirectory(repo);
     await writeFile(path.join(repo, ".git", "HEAD"), `${"a".repeat(41)}\n`);
-    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(repo);
+    expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBe(await realpath(repo));
 
     await writeFile(path.join(repo, ".git", "HEAD"), `ref:${String.fromCharCode(11)}refs/heads/main\n`);
     expect((await loadIgnoreContext(repo, { ceiling: workspace })).repositoryRoot).toBeNull();
@@ -535,6 +534,25 @@ describe("repository detection and incomplete rules", () => {
     const verdict = explainIgnoreStatus(await loadIgnoreContext(repo, { ceiling: workspace }), repo, ".env.local");
     expect(verdict.status).toBe("unknown");
     expect(verdict.reasons[0]).toContain("could not be confirmed because .git/config has lines EnvSync does not parse");
+  });
+
+  test.each([
+    // git 2.46 matches these through its literal-prefix split; git 2.55+ matches the whole pattern.
+    ["apps**/.env.local", "unknown"],
+    ["*.local\n!apps**/.env.local", "unknown"],
+    // Same answer under both behaviours: reported normally.
+    ["*.local\n!app**/web/.env.local", "not-ignored"],
+    ["apps/web**", "ignored"],
+  ])("patterns older and newer git match differently are unknown: %j", async (rules, expected) => {
+    const repo = path.join(workspace, "repo");
+    await makeMinimalGitDirectory(repo);
+    await writeFile(path.join(repo, ".git", "config"), "[core]\n\tignorecase = false\n");
+    await writeFile(path.join(repo, ".gitignore"), `${rules}\n`);
+    const project = path.join(repo, "apps", "web");
+    await mkdir(project, { recursive: true });
+    const verdict = explainIgnoreStatus(await loadIgnoreContext(project, { ceiling: workspace }), project, ".env.local");
+    expect(verdict.status).toBe(expected);
+    if (expected === "unknown") expect(verdict.reasons.join(" ")).toContain("older and newer git versions");
   });
 
   test("a project deeper than the search limit is unknown, not 'not in a repository'", async () => {

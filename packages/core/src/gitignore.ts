@@ -20,7 +20,15 @@ import { compileGitPathPattern, compileWildmatch, wildmatch, type CompiledPatter
  * repository's own config and the answer depends on it), the answer is "unknown", never a guess.
  */
 
-type Rule = { negated: boolean; directoryOnly: boolean; anchored: boolean; pattern: CompiledPattern };
+/**
+ * `pattern` is matched the way git up to 2.46 does (literal prefix compared first, so a `**` right
+ * after it starts the rest of the pattern); newer git versions match the whole pattern at once.
+ * The two only differ when `**` directly follows a literal prefix that does not end in `/`
+ * (`apps**\/x`); `modernPattern` is set only for those rules.
+ */
+type Rule = { negated: boolean; directoryOnly: boolean; anchored: boolean; pattern: CompiledPattern; modernPattern?: CompiledPattern };
+
+type MatchVariant = "prefix-split" | "whole-pattern";
 
 /** Rules from one ignore file; they apply to paths inside `base`. */
 type RuleSet = {
@@ -63,6 +71,8 @@ export const MAX_PATTERN_LENGTH = 4_096;
 const MAX_CONFIG_LINE_LENGTH = 1_024;
 const LINKED_METADATA = "this is a linked worktree or submodule, whose git metadata EnvSync does not read";
 const OUTSIDE_PROJECT_REASON = "the path is outside the project EnvSync checked, so its repository was not searched";
+const VERSION_DEPENDENT_REASON =
+  "a .gitignore pattern with ** directly after other characters (like apps**/x) is matched differently by older and newer git versions, and the result depends on it";
 const NOT_SET_REASON = "the result depends on core.ignorecase, which .git/config does not set (global settings are not read)";
 
 /**
@@ -192,21 +202,31 @@ export function explainIgnoreStatus(context: IgnoreContext, projectRoot: string,
   }
   if (reasons.length > 0) return { status: "unknown", reasons };
 
-  const verdict = (ignoreCase: boolean): boolean => {
+  const verdict = (ignoreCase: boolean, variant: MatchVariant): boolean => {
     // Git does not look inside an ignored directory, so an ignored ancestor ignores the file.
     for (let directory = root; directory !== context.repositoryRoot; directory = path.dirname(directory)) {
-      if (decide(context, directory, true, ignoreCase)) return true;
+      if (decide(context, directory, true, ignoreCase, variant)) return true;
       if (path.dirname(directory) === directory) break;
     }
-    return decide(context, target, false, ignoreCase);
+    return decide(context, target, false, ignoreCase, variant);
   };
 
-  if (context.ignoreCase !== undefined) return { status: verdict(context.ignoreCase) ? "ignored" : "not-ignored", reasons: [] };
-  // core.ignorecase is not established (it may come from global settings EnvSync does not read):
-  // an answer is only reported when both settings agree.
-  const sensitive = verdict(false);
-  if (sensitive === verdict(true)) return { status: sensitive ? "ignored" : "not-ignored", reasons: [] };
-  return { status: "unknown", reasons: [context.ignoreCaseUnknownReason] };
+  // An answer is only reported when every possibility agrees: both core.ignorecase settings when
+  // the value is not established, and both git matching behaviours for `apps**/x`-style patterns.
+  const caseSettings = context.ignoreCase === undefined ? [false, true] : [context.ignoreCase];
+  const variants: MatchVariant[] = hasVersionDependentRules(context) ? ["prefix-split", "whole-pattern"] : ["prefix-split"];
+  const outcomes = new Set<string>();
+  for (const ignoreCase of caseSettings) for (const variant of variants) outcomes.add(`${ignoreCase}|${variant}|${verdict(ignoreCase, variant)}`);
+  const answers = new Set([...outcomes].map((outcome) => outcome.endsWith("true")));
+  if (answers.size === 1) return { status: answers.has(true) ? "ignored" : "not-ignored", reasons: [] };
+
+  const uncertainty: string[] = [];
+  const differsByCase = caseSettings.length > 1 && variants.some((variant) => verdict(false, variant) !== verdict(true, variant));
+  const differsByVersion = variants.length > 1 && caseSettings.some((ignoreCase) => verdict(ignoreCase, "prefix-split") !== verdict(ignoreCase, "whole-pattern"));
+  if (differsByCase) uncertainty.push(context.ignoreCaseUnknownReason);
+  if (differsByVersion) uncertainty.push(VERSION_DEPENDENT_REASON);
+  // Both flags can be false only when the disagreement needs both factors at once.
+  return { status: "unknown", reasons: uncertainty.length > 0 ? uncertainty : [context.ignoreCaseUnknownReason, VERSION_DEPENDENT_REASON] };
 }
 
 /** Kept for callers that only need a yes/no and have already ruled out "unknown". */
@@ -276,7 +296,11 @@ function toRealPath(context: IgnoreContext, projectRoot: string): string | null 
 }
 
 /** The last matching rule wins across all applicable rulesets, in precedence order. */
-function decide(context: IgnoreContext, target: string, isDirectory: boolean, ignoreCase: boolean): boolean {
+function hasVersionDependentRules(context: IgnoreContext): boolean {
+  return context.ruleSets.some((ruleSet) => ruleSet.rules.some((rule) => rule.modernPattern !== undefined));
+}
+
+function decide(context: IgnoreContext, target: string, isDirectory: boolean, ignoreCase: boolean, variant: MatchVariant): boolean {
   let ignored = false;
   for (const { base, rules } of context.ruleSets) {
     if (!isInside(base, target)) continue;
@@ -284,7 +308,8 @@ function decide(context: IgnoreContext, target: string, isDirectory: boolean, ig
     const baseName = relativePath.slice(relativePath.lastIndexOf("/") + 1);
     for (const rule of rules) {
       if (rule.directoryOnly && !isDirectory) continue;
-      if (wildmatch(rule.pattern, rule.anchored ? relativePath : baseName, ignoreCase)) ignored = !rule.negated;
+      const pattern = variant === "whole-pattern" ? (rule.modernPattern ?? rule.pattern) : rule.pattern;
+      if (wildmatch(pattern, rule.anchored ? relativePath : baseName, ignoreCase)) ignored = !rule.negated;
     }
   }
   return ignored;
@@ -320,9 +345,24 @@ export function parseIgnoreRules(text: string): { rules: Rule[]; truncated: bool
     const anchored = line.includes("/");
     if (line.startsWith("/")) line = line.slice(1);
     if (line === "") continue;
-    rules.push({ negated, directoryOnly, anchored, pattern: anchored ? compileGitPathPattern(line) : compileWildmatch(line) });
+    if (!anchored) {
+      rules.push({ negated, directoryOnly, anchored, pattern: compileWildmatch(line) });
+      continue;
+    }
+    const rule: Rule = { negated, directoryOnly, anchored, pattern: compileGitPathPattern(line) };
+    if (isVersionDependent(line)) rule.modernPattern = compileWildmatch(line);
+    rules.push(rule);
   }
   return { rules, truncated };
+}
+
+/**
+ * Whether older and newer git can disagree on an anchored pattern: `**` directly after a literal
+ * prefix (everything before the first `*`, `?`, `[` or `\`) that does not end with `/`.
+ */
+function isVersionDependent(pattern: string): boolean {
+  const wildcard = pattern.search(/[*?[\\]/);
+  return wildcard > 0 && pattern[wildcard - 1] !== "/" && pattern.startsWith("**", wildcard);
 }
 
 /** Git trims trailing ASCII spaces only, and keeps a space escaped with a backslash. */

@@ -65,9 +65,9 @@ output shape are public contracts (ADR-003); changes to them are called out expl
     limit, gives `unknown` instead of `skip`. `HEAD` is checked like git (first 255 bytes,
     `ref:` + space/tab/CR/LF, 40+ hex digits in any case).
   - Case folding reproduces git's asymmetry (escaped letters and single class members are not
-    folded), reversed class ranges match their first character like git, and anchored patterns use
-    git's literal-prefix split, so `!apps**/.env.local`, `.[E]nv.local` and `!.[e-a]nv.local` no
-    longer produce a false pass.
+    folded) and reversed class ranges match their first character like git, so `.[E]nv.local` and
+    `!.[e-a]nv.local` no longer produce a false pass. Patterns like `apps**/.env.local`, which older
+    and newer git versions match differently, are `unknown` when the two behaviours disagree.
   - `core.ignorecase` is only trusted from an exact `[core]` section of a fully parsed
     `.git/config`; otherwise both settings are evaluated and a result that depends on it is
     `unknown`. A tracked file whose name differs only by letter case is `unknown` unless

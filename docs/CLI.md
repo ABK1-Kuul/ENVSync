@@ -130,8 +130,10 @@ How the git checks work without running git:
 - **Ignore rules** come from `.gitignore` files between the project and the repository root plus
   `.git/info/exclude`, evaluated like git: LF line splitting, only trailing ASCII spaces trimmed,
   byte-wise wildmatch where `*`, `?` and `[...]` never match `/`, invalid patterns matching
-  nothing, and git's literal-prefix split for patterns containing `/` (so `apps**/.env.local`
-  matches across directories, as in git). Matching runs in linear time, so a hostile `.gitignore`
+  nothing. Git versions differ on one form: with `**` directly after other characters in a pattern
+  containing `/` (like `apps**/.env.local`), git 2.46 and older match across directories while
+  newer git (2.55 and later were tested) does not; EnvSync evaluates both and reports `unknown`
+  when they disagree. Matching runs in linear time, so a hostile `.gitignore`
   cannot hang `doctor`. If an ignore file that applies is oversized, unreadable, symlinked, or
   exceeds 10,000 rules / 4,096-character patterns, the result is `unknown`, never `ignored`.
 - **Case folding** follows git when `core.ignorecase` is on: path letters and plain pattern

@@ -23,8 +23,9 @@
  *   pattern match nothing, as in git.
  * - A trailing unescaped backslash makes the pattern match nothing.
  * - For path patterns (`compileGitPathPattern`), the literal prefix before the first wildcard is
- *   compared separately and the rest is matched on its own, as git's `match_pathname` does. That
- *   is why `apps**\/x` also matches `apps/web/x`: after the prefix, `**` starts the pattern.
+ *   compared separately and the rest is matched on its own, as git's `match_pathname` does in git
+ *   2.46 and older. That is why `apps**\/x` also matches `apps/web/x` there: after the prefix, `**`
+ *   starts the pattern. Newer git matches the whole pattern; gitignore.ts evaluates both.
  */
 
 type ClassItem = { from: number; to: number; single: boolean } | { posix: PosixClass };
