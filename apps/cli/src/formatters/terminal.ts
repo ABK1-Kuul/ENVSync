@@ -29,8 +29,13 @@ export function formatTerminal(result: ScanResult, counts: SeverityCounts, stric
       `Found ${plural(counts.errors, "error")}, ${plural(counts.warnings, "warning")} and ${counts.infos} info in ${files}.`,
     );
   }
-  if (strict && counts.errors === 0 && counts.warnings > 0 && exitCode !== 0) {
-    lines.push("Strict mode: warnings cause a non-zero exit code.");
+  if (!result.complete) {
+    // A clean result must not look complete when some paths were never read.
+    lines.push(`Scan incomplete: ${plural(result.skipped.length, "path")} not scanned (listed above), so findings may be missing.`);
+  }
+  if (strict && counts.errors === 0 && exitCode !== 0) {
+    if (counts.warnings > 0) lines.push("Strict mode: warnings cause a non-zero exit code.");
+    if (!result.complete) lines.push("Strict mode: an incomplete scan causes a non-zero exit code.");
   }
 
   return `${lines.map(sanitizeForOutput).join("\n")}\n`;

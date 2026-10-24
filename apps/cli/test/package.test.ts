@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -70,5 +70,41 @@ describe("staged npm package", () => {
     const scan = run(["scan", fixture, "--format", "json"]);
     expect(scan.code).toBe(1); // the drift fixture has findings
     expect(JSON.parse(scan.stdout)).toMatchObject({ schemaVersion: 1 });
+  });
+});
+
+describe("staging refuses non-regular inputs", () => {
+  test("a symlinked LICENSE is not followed into the package", async (context) => {
+    // Mirror the repository layout the script expects, with the real bundle and a symlinked LICENSE.
+    const mirror = path.join(workspace, "mirror");
+    const cliDir = path.join(mirror, "apps", "cli");
+    await mkdir(path.join(cliDir, "scripts"), { recursive: true });
+    await mkdir(path.join(cliDir, "dist"), { recursive: true });
+    await copyFile(stageScript, path.join(cliDir, "scripts", "stage.mjs"));
+    await copyFile(path.join(stageDir, "dist", "envsync.js"), path.join(cliDir, "dist", "envsync.js"));
+    await copyFile(fileURLToPath(new URL("../package.json", import.meta.url)), path.join(cliDir, "package.json"));
+    await writeFile(path.join(mirror, "CHANGELOG.md"), "# Changelog\n");
+    await writeFile(path.join(mirror, "README.md"), "# EnvSync\n");
+    const secret = path.join(workspace, "not-for-publishing.txt");
+    await writeFile(secret, "PRIVATE CONTENT\n");
+    try {
+      await symlink(secret, path.join(mirror, "LICENSE"), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") context.skip("file symlinks are not permitted for this user on this platform");
+      throw error;
+    }
+
+    const out = path.join(workspace, "mirror-stage");
+    let failed = false;
+    let stderr = "";
+    try {
+      execFileSync(process.execPath, [path.join(cliDir, "scripts", "stage.mjs"), "--no-bundle", "--out", out], { stdio: "pipe" });
+    } catch (error) {
+      failed = true;
+      stderr = String((error as { stderr?: Buffer }).stderr ?? "");
+    }
+    expect(failed).toBe(true);
+    expect(stderr).toContain("is not a regular file");
+    await expect(readFile(path.join(out, "LICENSE"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -31,22 +31,36 @@ output shape are public contracts (ADR-003); changes to them are called out expl
   and bidi characters from repository content.
 - Hardening from the Sprint 2 security and code reviews:
   - `doctor` fails when a `.env*.local` file is already tracked by git (read from `.git/index`),
-    instead of passing because `.gitignore` lists it; warns when tracking cannot be checked.
-  - `.gitignore` evaluation now follows git exactly (verified against `git check-ignore`), runs in
-    linear time, and cannot be crashed by malformed patterns.
+    instead of passing because `.gitignore` lists it.
+  - New `doctor` status `unknown`: whenever ignore or tracking status cannot be established
+    (unreadable/oversized/over-limit ignore files, split or sparse index, malformed or oversized
+    index, linked worktrees), the result is `unknown`, never `pass`. `doctor --strict` fails on
+    `warn` and `unknown`.
+  - A `.git` directory counts as a repository only if git would accept it (`HEAD`, `objects/`,
+    `refs/`), so a planted `.git` cannot supply its own ignore rules.
+  - The git index reader is bounded (per-name and total decoded bytes) and rejects malformed
+    varints, entries and extensions.
+  - `.gitignore` evaluation matches `git check-ignore` on the tested corpus (including non-ASCII
+    names and `core.ignorecase`), works on bytes like git, runs in linear time, and cannot be
+    crashed by malformed patterns. Known deviations are documented.
   - `init --write` verifies file identity through the open handle (symlink and hard-link swaps are
-    refused on every platform), rolls back failed appends, removes incomplete new files, and
-    refuses appends that would land inside an unterminated quoted value.
-  - Reads of project files go through a verified handle, closing a check-then-read race.
+    refused on every platform), checks every append target before writing anything, rolls back
+    failed appends, removes only its own incomplete new files, and refuses appends that would land
+    inside an unterminated quoted value. Hard-linked `.env.example` files are blocked in the preview.
+  - Reads of project files and the git index go through a verified handle.
   - Output and stderr escape zero-width, invisible, tag and lone-surrogate characters and newlines
     inside names; config syntax errors are reported by TypeScript code only.
-  - Scans stop at 20,000 files or 200 MB of source and disclose it (`limit-reached`).
+  - Discovery stops at 200,000 entries and scans at 20,000 files or 200 MB of source. Any path
+    not scanned makes the scan incomplete (`summary.complete: false`, "Scan incomplete" in the
+    terminal), and `scan --strict` then exits 1.
+  - Package staging refuses symlinked inputs.
   - Documentation recommends running `npx envsync` outside the checkout, so a repository's
     `.npmrc` cannot change what runs.
 
 ### Fixed
 - Windows CI: `.gitattributes` fixes line endings to LF; CI installs the pinned pnpm directly
-  because the Corepack bundled with Node 22.12.0 cannot run pnpm 12.
+  because the Corepack bundled with Node 22.12.0 cannot run pnpm 12; the packaging step uses
+  paths relative to `RUNNER_TEMP` (GNU tar misreads `D:\...`) and locale-independent sorting.
 - `init` no longer appends the same block repeatedly to a `.env.example` that ends inside an
   unclosed quote, and no longer reports "already lists every declared variable" for a broken config.
 - Documentation no longer suggests importing `defineConfig` from `envsync` (it is not exported).

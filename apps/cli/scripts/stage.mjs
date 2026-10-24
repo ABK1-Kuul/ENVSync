@@ -1,16 +1,32 @@
 // Assembles the publishable `envsync` package in a directory outside the source tree, so no
 // generated copies are ever left in the repository. Usage:
-//   node apps/cli/scripts/stage.mjs [--out <empty-or-new-directory>]
+//   node apps/cli/scripts/stage.mjs [--out <empty-or-new-directory>] [--no-bundle]
 // Then: npm pack <dir>   (or, for a release: npm publish <dir>)
-import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+// --no-bundle reuses an existing dist/envsync.js (used by tests that stage a copied tree).
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import "./bundle.mjs";
+
+if (!process.argv.includes("--no-bundle")) await import("./bundle.mjs");
 
 const cliDir = fileURLToPath(new URL("../", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const repositoryBlobUrl = "https://github.com/ABK1-Kuul/ENVSync/blob/main/";
+
+// Every published input must be a regular file: a symlinked LICENSE/README/CHANGELOG (or bundle)
+// would otherwise publish whatever it points to.
+const inputs = {
+  bundle: path.join(cliDir, "dist", "envsync.js"),
+  manifest: path.join(cliDir, "package.json"),
+  license: path.join(repoRoot, "LICENSE"),
+  changelog: path.join(repoRoot, "CHANGELOG.md"),
+  readme: path.join(repoRoot, "README.md"),
+};
+for (const file of Object.values(inputs)) {
+  const stats = await lstat(file);
+  if (!stats.isFile()) throw new Error(`Refusing to stage ${file}: it is not a regular file (symbolic links are not followed).`);
+}
 
 const outIndex = process.argv.indexOf("--out");
 let outDir;
@@ -24,19 +40,19 @@ if (outIndex !== -1) {
 
 // Only fields consumers need. Dropping devDependencies and scripts keeps internal package names
 // and build tooling out of the published manifest; `private` is dropped only here.
-const source = JSON.parse(await readFile(path.join(cliDir, "package.json"), "utf8"));
+const source = JSON.parse(await readFile(inputs.manifest, "utf8"));
 const PUBLISHED_FIELDS = ["name", "version", "description", "license", "type", "bin", "files", "engines", "keywords", "repository", "homepage", "bugs", "dependencies"];
 const manifest = Object.fromEntries(PUBLISHED_FIELDS.filter((field) => field in source).map((field) => [field, source[field]]));
 await writeFile(path.join(outDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
 await mkdir(path.join(outDir, "dist"));
-await copyFile(path.join(cliDir, "dist", "envsync.js"), path.join(outDir, "dist", "envsync.js"));
+await copyFile(inputs.bundle, path.join(outDir, "dist", "envsync.js"));
 await chmod(path.join(outDir, "dist", "envsync.js"), 0o755);
-await copyFile(path.join(repoRoot, "LICENSE"), path.join(outDir, "LICENSE"));
-await copyFile(path.join(repoRoot, "CHANGELOG.md"), path.join(outDir, "CHANGELOG.md"));
+await copyFile(inputs.license, path.join(outDir, "LICENSE"));
+await copyFile(inputs.changelog, path.join(outDir, "CHANGELOG.md"));
 
 // Relative links in the repository README would be broken on npm; point them at GitHub instead.
-const readme = await readFile(path.join(repoRoot, "README.md"), "utf8");
+const readme = await readFile(inputs.readme, "utf8");
 await writeFile(
   path.join(outDir, "README.md"),
   readme.replace(/\]\((?!https?:|#|mailto:)([^)]+)\)/g, (_match, target) => `](${repositoryBlobUrl}${target})`),

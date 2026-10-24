@@ -117,17 +117,23 @@ export async function readProjectFile(directory: string, fileName: string): Prom
   }
 }
 
-export type RegularFileRead =
-  | { ok: true; text: string }
-  | { ok: false; reason: "missing" | "not-regular" | "too-large" | "changed" | "unreadable" };
+export type ReadFailure = { ok: false; reason: "missing" | "not-regular" | "too-large" | "changed" | "unreadable" };
+
+export type RegularFileRead = { ok: true; text: string } | ReadFailure;
+
+/** `readRegularFileBytes`, decoded as UTF-8. */
+export async function readRegularFile(absolutePath: string, maxBytes = MAX_FILE_BYTES): Promise<RegularFileRead> {
+  const read = await readRegularFileBytes(absolutePath, maxBytes);
+  return read.ok ? { ok: true, text: read.bytes.toString("utf8") } : read;
+}
 
 /**
  * Reads a regular file without following links, through one verified handle: the opened file must
  * be the one `lstat` saw (same device and inode). This closes the check-then-read window in which a
  * crafted project could swap in a symlink to redirect the read (O_NOFOLLOW where the OS supports it;
- * the identity check on every platform).
+ * the identity check on every platform). At most `maxBytes` are ever read, even if the file grows.
  */
-export async function readRegularFile(absolutePath: string, maxBytes = MAX_FILE_BYTES): Promise<RegularFileRead> {
+export async function readRegularFileBytes(absolutePath: string, maxBytes = MAX_FILE_BYTES): Promise<{ ok: true; bytes: Buffer } | ReadFailure> {
   let before;
   try {
     before = await lstat(absolutePath, { bigint: true });
@@ -155,7 +161,7 @@ export async function readRegularFile(absolutePath: string, maxBytes = MAX_FILE_
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    return { ok: true, text: buffer.subarray(0, offset).toString("utf8") };
+    return { ok: true, bytes: buffer.subarray(0, offset) };
   } catch {
     return { ok: false, reason: "unreadable" };
   } finally {

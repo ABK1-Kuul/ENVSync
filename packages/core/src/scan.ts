@@ -16,6 +16,8 @@ export type ScanResult = {
   diagnostics: Diagnostic[];
   filesScanned: number;
   skipped: SkippedPath[];
+  /** False when any path was not scanned (see `skipped`); findings may then be incomplete. */
+  complete: boolean;
 };
 
 export type ScanOptions = {
@@ -53,7 +55,7 @@ export async function scanProject({ root, framework }: ScanOptions): Promise<Sca
     framework,
   });
 
-  return { diagnostics, filesScanned: evidence.filesScanned, skipped: evidence.skipped };
+  return { diagnostics, filesScanned: evidence.filesScanned, skipped: evidence.skipped, complete: evidence.skipped.length === 0 };
 }
 
 /** Parses the config as data; a parser crash becomes an ENV004 issue, never a fallback to evaluation. */

@@ -11,7 +11,7 @@ import {
   type GeneratedVariable,
 } from "@envsync-internal/schema";
 import type { FrameworkAdapter } from "./framework.js";
-import { collectSourceEvidence, CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, MAX_FILE_BYTES, readProjectFile } from "./project-files.js";
+import { collectSourceEvidence, CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, MAX_FILE_BYTES, readProjectFile, readRegularFile } from "./project-files.js";
 import { parseConfigSafely } from "./scan.js";
 
 /**
@@ -41,6 +41,8 @@ export type InitPlan = {
   exampleAdditions: string[];
   /** References whose names cannot be valid variable names and were left out. */
   skippedNames: string[];
+  /** Paths that were not scanned (symlinks, unreadable, too large, limits); declarations may be missing. */
+  notScanned: number;
   dynamicAccessCount: number;
   /** Problems found in an existing config (run `scan` for details). */
   configIssueCount: number;
@@ -125,7 +127,8 @@ export async function planInit({ root, framework }: { root: string; framework: F
     existingNames = parsed.entries.map((entry) => entry.name);
     const listed = new Set(existingNames);
     exampleAdditions = contractNames.filter((name) => !listed.has(name));
-    changes.push(planExampleAppend(exampleText, parsed.unterminatedQuoteLine, exampleAdditions));
+    const linkCount = await hardLinkCount(path.join(absoluteRoot, ENV_EXAMPLE_FILE_NAME));
+    changes.push(planExampleAppend(exampleText, parsed.unterminatedQuoteLine, exampleAdditions, linkCount));
   }
 
   return {
@@ -133,15 +136,24 @@ export async function planInit({ root, framework }: { root: string; framework: F
     configVariables,
     exampleAdditions,
     skippedNames: [...skippedNames].sort(compare),
+    notScanned: evidence.skipped.length,
     dynamicAccessCount,
     configIssueCount,
     caseCollisions: caseOnlyGroups([...existingNames, ...exampleAdditions]),
   };
 }
 
-function planExampleAppend(exampleText: string, unterminatedQuoteLine: number | undefined, additions: string[]): FileChange {
+function planExampleAppend(exampleText: string, unterminatedQuoteLine: number | undefined, additions: string[], linkCount: bigint): FileChange {
   if (additions.length === 0) {
     return { path: ENV_EXAMPLE_FILE_NAME, action: "unchanged", reason: "already lists every declared variable." };
+  }
+  if (linkCount !== 1n) {
+    // Appending would also change every other name for this file, possibly outside the project.
+    return {
+      path: ENV_EXAMPLE_FILE_NAME,
+      action: "blocked",
+      reason: "the file has more than one hard link, so appending would also change another file. Replace it with a regular copy, then run init again.",
+    };
   }
   if (unterminatedQuoteLine !== undefined) {
     return {
@@ -180,6 +192,12 @@ export async function applyInitPlan(root: string, plan: InitPlan): Promise<strin
     if (change.action === "blocked") throw new InitError("BLOCKED", `Cannot update ${change.path}: ${change.reason} No files were changed.`);
   }
 
+  // Preflight: verify every append target before writing anything, so a refusal never leaves a
+  // half-applied plan (for example, a created config next to an untouched .env.example).
+  for (const change of plan.changes) {
+    if (change.action === "append") await preflightAppend(path.join(absoluteRoot, change.path), change.path, change.baseHash);
+  }
+
   const written: string[] = [];
   for (const change of plan.changes) {
     const absolutePath = path.join(absoluteRoot, change.path);
@@ -208,20 +226,49 @@ async function createExclusively(absolutePath: string, displayPath: string, cont
     throw new InitError("WRITE_FAILED", `Could not create ${displayPath} (${errorCode(error)}).${appliedNote(written)} Check permissions and try again.`);
   }
 
+  let created: { dev: bigint; ino: bigint } | undefined;
   try {
+    created = await handle.stat({ bigint: true });
     await writeAll(handle, Buffer.from(content, "utf8"));
     await handle.close();
   } catch (error) {
     await handle.close().catch(() => undefined);
-    // The file is ours (exclusive create), so removing it cannot destroy anyone else's work.
-    const removed = await unlink(absolutePath).then(
-      () => true,
-      () => false,
-    );
+    // Remove only the file this run created: if anything else now sits at the path, leave it.
+    const removed = created !== undefined && (await unlinkIfSameFile(absolutePath, created));
     throw new InitError(
       "WRITE_FAILED",
-      `Writing ${displayPath} failed (${errorCode(error)}). ${removed ? "The incomplete file was removed." : `An incomplete ${displayPath} may remain; delete it before running init again.`}${appliedNote(written)}`,
+      `Writing ${displayPath} failed (${errorCode(error)}). ${removed ? "The incomplete file was removed." : `An incomplete ${displayPath} may remain; check it before running init again.`}${appliedNote(written)}`,
     );
+  }
+}
+
+async function unlinkIfSameFile(absolutePath: string, identity: { dev: bigint; ino: bigint }): Promise<boolean> {
+  try {
+    const current = await lstat(absolutePath, { bigint: true });
+    if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino) return false;
+    await unlink(absolutePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The checks `appendVerified` repeats at write time, done before any file is written. */
+async function preflightAppend(absolutePath: string, displayPath: string, baseHash: string): Promise<void> {
+  const changed = (detail: string) =>
+    new InitError("FILE_CHANGED", `${displayPath} ${detail}, so nothing was written. Run \`envsync init\` again to review the new preview.`);
+  if ((await hardLinkCount(absolutePath)) !== 1n) throw changed("has more than one hard link or is no longer a regular file");
+  const read = await readRegularFile(absolutePath);
+  if (!read.ok || fingerprint(read.text) !== baseHash) throw changed("changed after planning");
+}
+
+/** Hard-link count of a regular file; 0 when it is missing or not a regular file. */
+async function hardLinkCount(absolutePath: string): Promise<bigint> {
+  try {
+    const stats = await lstat(absolutePath, { bigint: true });
+    return stats.isFile() ? stats.nlink : 0n;
+  } catch {
+    return 0n;
   }
 }
 
