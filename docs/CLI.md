@@ -32,9 +32,19 @@ What a scan never does: read `.env` or `.env.*` files (other than `.env.example`
 variable value, execute or import project code (including the config and `next.config.*`), follow
 symbolic links or junctions, or make network requests.
 
-Skipped during discovery: `.git`, `node_modules`, `.next`, `dist`, `build`, `out`, `coverage`
-(at any depth, case-insensitive). Symlinks, unreadable directories, files over 1,000,000 bytes and
-files the parser cannot handle are listed under "Not scanned" / `skipped`.
+Skipped during discovery (case-insensitive): `.git`, `node_modules` and `.next` at any depth; the
+generated-output names `dist`, `build`, `out` and `coverage` at any depth **except** inside the
+project's route tree (`app/` or `pages/` at the scanned root or under `src/`), where they are
+Next.js route segments (`app/build/page.tsx` is scanned; `packages/app/dist` is not). The route
+tree is identified relative to the directory you scan, so scan the Next.js app's root.
+
+Symbolic links are never followed. Because a link's target type is unknown without following it,
+a link counts as "not scanned" (and makes the scan incomplete) unless its name is clearly not
+scanned: an env file, an excluded directory name, a type declaration, or a known non-source
+extension (images, fonts, media, `.md`, `.json`, `.css`, `.yml`, archives, …). So a linked
+`node_modules`, `logo.png` or `.env.local` is ignored, while a linked `lib`, `api.v2` or
+`[...slug]` directory is reported. Unreadable directories, files over 1,000,000 bytes and files
+the parser cannot handle are listed too.
 
 ## `envsync init`
 
@@ -90,20 +100,29 @@ and `unknown` also cause exit code 1.
 | Check id | Fails when | Warns when |
 |---|---|---|
 | `node-version` | Node.js is older than 22.12.0 | |
-| `source-files` | the directory is missing or not a directory | no source files are found |
+| `source-files` | the directory is missing or not a directory | no source files are found, or some paths will not be scanned (listed by reason: symlinked, unreadable). **Unknown** when the project exceeds the scan limits (file count or directory entries; the 200 MB byte limit is only detected by `scan`) |
 | `package-json` | `package.json` is invalid JSON, symlinked or oversized | it is missing |
 | `framework` | | `next` is not a dependency (with a monorepo hint at workspace roots); version ranges are never printed |
 | `config` | `envsync.config.ts` is missing or has problems | |
 | `env-example` | `.env.example` is symlinked or oversized | it is missing, or has lines that are not `KEY=value` (reported by line number only) |
 | `env-files-ignored` | a `.env*.local` file is tracked by git (committed), or exists and is definitely not ignored | a shared `.env`/`.env.<mode>` file is committed or not ignored, or `.env.local` would not be ignored if created. **Unknown** when ignore or tracking status could not be established (see below). |
 
-`env-files-ignored` reports `skip` outside a git repository. `.local` matching is case-insensitive.
+`env-files-ignored` reports `skip` only when EnvSync is sure the project is outside any git
+repository. `.local` matching is case-insensitive.
 
 How the git checks work without running git:
-- **Repository root.** A `.git` directory counts only if git would accept it: `HEAD` naming a ref
-  or object, plus `objects/` and `refs/`. Otherwise the search continues upward, as git's does, so
-  a planted `.git` folder cannot supply its own ignore rules. A `.git` *file* (linked worktree or
-  submodule) makes the result `unknown`, because its metadata lives elsewhere.
+- **Repository search.** Starts from the project's real path (symlinks and junctions resolved),
+  as git does, and walks up at most 64 levels. If the real path cannot be resolved or the limit
+  is hit, the result is `unknown`.
+- **Repository root.** A `.git` directory counts only if git would accept it, following git's
+  `validate_headref`/`is_git_directory`: the first 255 bytes of `HEAD` name a ref (`ref:` +
+  optional space/tab/CR/LF + `refs/`) or an object id (40 or more hex digits, any case), and
+  `objects/` and `refs/` exist. A `.git` that git definitely rejects (no `HEAD`, an invalid
+  `HEAD`, missing `objects/`/`refs/`) is passed over, as git does, so a planted `.git` folder
+  cannot supply its own ignore rules. A `.git` git might accept but EnvSync cannot verify — any
+  of `.git`, `HEAD`, `objects/` or `refs/` being a link or not a plain file/directory, a
+  `commondir` file, or an oversized `HEAD` — makes the result `unknown`, never `skip`. A `.git`
+  *file* (linked worktree or submodule) makes it `unknown` too, because its metadata lives elsewhere.
 - **Tracked files** are read from `.git/index` (versions 2–4; file names only). An already
   committed file stays tracked even if `.gitignore` lists it, so this is checked first. The
   result is `unknown` when the index cannot be read, uses a split index (`link`) or sparse index
@@ -111,13 +130,27 @@ How the git checks work without running git:
 - **Ignore rules** come from `.gitignore` files between the project and the repository root plus
   `.git/info/exclude`, evaluated like git: LF line splitting, only trailing ASCII spaces trimmed,
   byte-wise wildmatch where `*`, `?` and `[...]` never match `/`, invalid patterns matching
-  nothing, and `core.ignorecase` (ASCII letters only) from `.git/config`. Matching runs in linear
-  time, so a hostile `.gitignore` cannot hang `doctor`. If an ignore file that applies is
-  oversized, unreadable, symlinked, or exceeds 10,000 rules / 4,096-character patterns, the
-  result is `unknown`, never `ignored`. Behaviour is tested against `git check-ignore`.
-- Known deviations from git: the global excludes file (`core.excludesFile`) is not read; git's
-  literal-prefix handling makes a pattern like `apps**/.env.local` also match across directories,
-  which EnvSync does not (it errs towards "not ignored").
+  nothing, and git's literal-prefix split for patterns containing `/` (so `apps**/.env.local`
+  matches across directories, as in git). Matching runs in linear time, so a hostile `.gitignore`
+  cannot hang `doctor`. If an ignore file that applies is oversized, unreadable, symlinked, or
+  exceeds 10,000 rules / 4,096-character patterns, the result is `unknown`, never `ignored`.
+- **Case folding** follows git when `core.ignorecase` is on: path letters and plain pattern
+  letters are compared case-insensitively (ASCII only), but letters written after a backslash
+  (`\E`) and single class members (`[E]`) are compared as written. The value comes from an exact
+  `[core]` section of `.git/config` (not `[core "x"]`). If the file does not set it, or contains
+  anything EnvSync does not fully parse (includes, quoted values, continuations,
+  `extensions.worktreeConfig`), both settings are evaluated, and a result that differs between
+  them is `unknown` (global git settings are not read). An index entry whose name differs from a
+  local env file only by letter case counts as tracked when `core.ignorecase=true`, and is
+  `unknown` otherwise: even with `core.ignorecase=false`, git commits changes to it on a
+  case-insensitive file system.
+- Behaviour is tested against `git check-ignore` on a corpus of patterns (including escapes,
+  classes, reversed ranges and negations), nested `.gitignore` files, non-ASCII names and both
+  case settings.
+- Known deviations from git: the global excludes file (`core.excludesFile`) is not read; the
+  `GIT_DIR`, `GIT_CEILING_DIRECTORIES` and `GIT_DISCOVERY_ACROSS_FILESYSTEM` environment
+  variables are not consulted (EnvSync does not stop at file-system boundaries); and bare
+  repositories found while walking up are not recognized.
 
 JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "unknown", "skip", "strict", "exitCode" }, "checks": [{ "id", "status", "message", "suggestion"? }] }`.
 
@@ -205,7 +238,10 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 ```json
 {
   "schemaVersion": 1,
-  "summary": { "errors": 1, "warnings": 0, "infos": 0, "filesScanned": 3, "strict": false, "exitCode": 1 },
+  "summary": {
+    "errors": 1, "warnings": 0, "infos": 0, "filesScanned": 3,
+    "complete": false, "dynamicAccesses": 0, "strict": false, "exitCode": 1
+  },
   "diagnostics": [
     {
       "code": "ENV001",
@@ -235,7 +271,15 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 - Config syntax errors are reported by TypeScript diagnostic code only (for example
   `has a syntax error (TS1005).`), never with TypeScript's message text, which can quote source.
 - `summary.complete` is `false` whenever `skipped` is non-empty: findings may then be incomplete,
-  and `--strict` exits 1 even with no diagnostics. Terminal output says "Scan incomplete".
+  and `--strict` exits 1 even with no diagnostics. Terminal output says "Scan incomplete" (and
+  "at least N paths" when scanning stopped at a resource limit).
+- `summary.dynamicAccesses` counts ENV006 findings: places where variables are read dynamically
+  and therefore not checked. It does not affect the exit code (dynamic access is a limit of static
+  analysis, not an incomplete scan), but it is always shown, including in the terminal summary.
+- Contract changes within schema version 1 are additive only: `summary.complete` and
+  `summary.dynamicAccesses` (scan), and the `unknown` check status plus `summary.unknown` and
+  `summary.strict` (doctor) were added before the first release. Consumers that switch on
+  `status` should treat unrecognized values as "not a pass".
 - Messages are for humans; automation should rely on `code`, `severity` and location fields.
 
 ## Resource limits

@@ -17,7 +17,7 @@ export type { ParsedIndex, TrackedPaths } from "./git-index.js";
 export type { ClientExposedName, ExtractedReference, FrameworkAdapter, Location } from "./framework.js";
 export { explainIgnoreStatus, ignoreStatus, isIgnoredFile, isTrackedFile, loadIgnoreContext, parseGitConfig, parseIgnoreRules } from "./gitignore.js";
 export type { IgnoreContext, IgnoreContextOptions, IgnoreStatus } from "./gitignore.js";
-export { compileWildmatch, wildmatch } from "./wildmatch.js";
+export { compileGitPathPattern, compileWildmatch, wildmatch } from "./wildmatch.js";
 export { applyInitPlan, InitError, planInit } from "./init.js";
 export type { FileChange, InitErrorCode, InitPlan } from "./init.js";
 export { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, MAX_FILE_BYTES, readRegularFile, ScanError } from "./project-files.js";

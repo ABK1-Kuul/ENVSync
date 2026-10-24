@@ -9,6 +9,8 @@ import { applyInitPlan, planInit, readRegularFile, type FrameworkAdapter } from 
 // true once it has acted, which disarms it.
 const failure = vi.hoisted(() => ({
   fileName: "",
+  /** Reads of this file name stop early, as if the file shrank while being read. */
+  shortReadFileName: "",
   afterLstat: undefined as undefined | ((file: string) => Promise<boolean>),
   /** Runs once, right before the injected write error is thrown. */
   onWriteFailure: undefined as undefined | (() => Promise<void>),
@@ -26,7 +28,22 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     },
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
-      if (failure.fileName === "" || path.basename(String(args[0])) !== failure.fileName) return handle;
+      const name = path.basename(String(args[0]));
+      if (name === failure.shortReadFileName) {
+        // The file "shrinks" mid-read: the first read returns part of it, later reads hit EOF.
+        let reads = 0;
+        return new Proxy(handle, {
+          get(target, property) {
+            if (property === "read") {
+              return async (buffer: Buffer, offset: number, length: number, position: number) =>
+                reads++ === 0 ? target.read(buffer, offset, Math.max(1, Math.floor(length / 2)), position) : { bytesRead: 0, buffer };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      }
+      if (failure.fileName === "" || name !== failure.fileName) return handle;
       let writes = 0;
       return new Proxy(handle, {
         get(target, property) {
@@ -69,6 +86,7 @@ afterEach(async () => {
   failure.fileName = "";
   failure.afterLstat = undefined;
   failure.onWriteFailure = undefined;
+  failure.shortReadFileName = "";
   await rm(root, { recursive: true, force: true });
 });
 
@@ -122,6 +140,24 @@ describe("partial writes are cleaned up and reported accurately", () => {
     expect(error).toMatchObject({ code: "WRITE_FAILED" });
     expect((error as Error).message).toContain("may remain; check it");
     expect(await readFile(target, "utf8")).toBe("// someone else's file\n");
+  });
+
+  test("a file that shrinks while being read is reported as changed, never as complete", async () => {
+    const target = path.join(root, ".gitignore");
+    await writeFile(target, ".env*.local\n!.env.local\n");
+    failure.shortReadFileName = ".gitignore";
+    expect(await readRegularFile(target)).toEqual({ ok: false, reason: "changed" });
+    failure.shortReadFileName = "";
+    expect(await readRegularFile(target)).toEqual({ ok: true, text: ".env*.local\n!.env.local\n" });
+  });
+
+  test("a project file that shrinks while being read fails with an accurate READ_FAILED message", async () => {
+    await writeFile(path.join(root, ".env.example"), "A=\nB=\n");
+    failure.shortReadFileName = ".env.example";
+    const { readProjectFile } = await import("../src/project-files.js");
+    const error = await readProjectFile(root, ".env.example").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "READ_FAILED" });
+    expect((error as Error).message).toContain("changed or was replaced while EnvSync was reading it");
   });
 
   test("reads refuse a file swapped between the check and the open", async () => {

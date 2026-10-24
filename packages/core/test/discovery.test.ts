@@ -178,6 +178,59 @@ describe("discoverSourceFiles", () => {
     expect(error).toMatchObject({ code: "ROOT_NOT_DIRECTORY" });
   });
 
+  test("generated-output names are skipped, except as route segments inside app/ or pages/", async () => {
+    await writeTree(root, {
+      "app/build/page.tsx": "",
+      "src/app/out/page.tsx": "",
+      "pages/dist/index.tsx": "",
+      "app/(group)/coverage/page.tsx": "",
+      "packages/ui/dist/index.js": "",
+      "build/index.js": "",
+      "lib/out/x.ts": "",
+      "app/node_modules/x.js": "",
+      // Only the project's own route tree counts: other directories named app or pages do not.
+      "packages/app/dist/bundle.js": "",
+      "apps/pages/build/x.js": "",
+    });
+
+    expect((await discoverSourceFiles(root)).files).toEqual([
+      "app/(group)/coverage/page.tsx",
+      "app/build/page.tsx",
+      "pages/dist/index.tsx",
+      "src/app/out/page.tsx",
+    ]);
+  });
+
+  test("only symlinks that could have been scanned are reported as skipped", async () => {
+    const outside = path.join(workspace, "outside");
+    await writeTree(outside, { "x.ts": "", "dir/y.ts": "", "logo.png": "" });
+    await writeTree(root, { "src/a.ts": "" });
+    const link = (target: string, name: string, type: "dir" | "file") =>
+      symlink(path.join(outside, target), path.join(root, name), type === "dir" && process.platform === "win32" ? "junction" : type);
+
+    await link("dir", "node_modules", "dir"); // never scanned anyway
+    await link("dir", "linked-src", "dir"); // could be a source directory
+    // Directory names with dots are still directories (catch-all routes, versioned folders).
+    await mkdir(path.join(root, "app"));
+    await symlink(path.join(outside, "dir"), path.join(root, "app", "[...slug]"), process.platform === "win32" ? "junction" : "dir");
+    await link("dir", "api.v2", "dir");
+    let fileLinks = true;
+    try {
+      await link("logo.png", "logo.png", "file");
+      await link("x.ts", "linked.ts", "file");
+      await link("x.ts", ".env.local", "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      fileLinks = false; // file symlinks need Developer Mode on Windows; directory cases still run
+    }
+
+    const result = await discoverSourceFiles(root);
+    expect(result.files).toEqual(["src/a.ts"]);
+    expect(result.skipped.map((entry) => entry.path)).toEqual(
+      fileLinks ? ["api.v2", "app/[...slug]", "linked-src", "linked.ts"] : ["api.v2", "app/[...slug]", "linked-src"],
+    );
+  });
+
   test("stops at the entry limit, records it once, and is deterministic", async () => {
     await writeTree(root, { "a.ts": "", "b.ts": "", "c/d.ts": "", "c/e.ts": "", "f.ts": "" });
 

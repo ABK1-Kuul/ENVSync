@@ -1,5 +1,6 @@
 import type { Diagnostic, ScanResult, SeverityCounts } from "@envsync-internal/core";
 import { sanitizeJsonDocument } from "./sanitize.js";
+import { countDynamicAccesses } from "./summary.js";
 
 /** Version of the JSON output contract. Bump only with a documented breaking change. */
 export const JSON_SCHEMA_VERSION = 1;
@@ -14,6 +15,8 @@ export function formatJson(result: ScanResult, counts: SeverityCounts, strict: b
       filesScanned: result.filesScanned,
       // false when any path in `skipped` was not scanned: findings may be incomplete.
       complete: result.complete,
+      // ENV006 count: places where variables were read dynamically and therefore not checked.
+      dynamicAccesses: countDynamicAccesses(result.diagnostics),
       strict,
       exitCode,
     },

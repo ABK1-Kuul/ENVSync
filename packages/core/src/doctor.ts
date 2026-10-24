@@ -1,10 +1,10 @@
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { parseEnvExample } from "@envsync-internal/schema";
-import { discoverSourceFiles, DiscoveryError } from "./discovery.js";
+import { discoverSourceFiles, DiscoveryError, MAX_DISCOVERY_ENTRIES } from "./discovery.js";
 import type { FrameworkAdapter } from "./framework.js";
-import { explainIgnoreStatus, isTrackedFile, loadIgnoreContext } from "./gitignore.js";
-import { CONFIG_FILE_NAME, ENV_EXAMPLE_FILE_NAME, readProjectFile, ScanError } from "./project-files.js";
+import { explainIgnoreStatus, explainTrackedFile, loadIgnoreContext } from "./gitignore.js";
+import { CONFIG_FILE_NAME, DEFAULT_SCAN_LIMITS, ENV_EXAMPLE_FILE_NAME, readProjectFile, ScanError } from "./project-files.js";
 import { parseConfigSafely } from "./scan.js";
 
 /**
@@ -38,17 +38,38 @@ export async function runDoctor({ root, framework, gitSearchCeiling }: DoctorOpt
     const discovery = await discoverSourceFiles(absoluteRoot);
     // Same count as `scan`, which never treats the EnvSync config as application source.
     const count = discovery.files.filter((file) => file !== CONFIG_FILE_NAME).length;
-    const skippedNote = discovery.skipped.length > 0 ? ` ${discovery.skipped.length} symlinked or unreadable path(s) will be skipped.` : "";
-    checks.push(
-      count === 0
-        ? {
-            id: "source-files",
-            status: "warn",
-            message: `No source files found in ${absoluteRoot}.${skippedNote}`,
-            suggestion: "Run EnvSync from your Next.js app directory.",
-          }
-        : { id: "source-files", status: "pass", message: `Found ${count} source ${count === 1 ? "file" : "files"} to scan.${skippedNote}` },
-    );
+    const limitHit = discovery.skipped.some((entry) => entry.reason === "limit-reached") || count > DEFAULT_SCAN_LIMITS.maxFiles;
+    const symlinks = discovery.skipped.filter((entry) => entry.reason === "symlink").length;
+    const unreadable = discovery.skipped.filter((entry) => entry.reason === "unreadable").length;
+    const skippedParts = [
+      ...(symlinks > 0 ? [`${symlinks} symlinked ${symlinks === 1 ? "path" : "paths"}`] : []),
+      ...(unreadable > 0 ? [`${unreadable} unreadable ${unreadable === 1 ? "directory" : "directories"}`] : []),
+    ];
+    const files = `${count} source ${count === 1 ? "file" : "files"}`;
+    if (limitHit) {
+      checks.push({
+        id: "source-files",
+        status: "unknown",
+        message: `The project is larger than EnvSync's scan limits (${DEFAULT_SCAN_LIMITS.maxFiles} source files, ${MAX_DISCOVERY_ENTRIES} directory entries), so \`envsync scan\` will stop early and its results will be incomplete.`,
+        suggestion: "Run EnvSync on each app directory separately.",
+      });
+    } else if (count === 0) {
+      checks.push({
+        id: "source-files",
+        status: "warn",
+        message: `No source files found in ${absoluteRoot}.`,
+        suggestion: "Run EnvSync from your Next.js app directory.",
+      });
+    } else if (skippedParts.length > 0) {
+      checks.push({
+        id: "source-files",
+        status: "warn",
+        message: `Found ${files} to scan, but ${skippedParts.join(" and ")} will not be scanned, so \`envsync scan\` will report an incomplete scan.`,
+        suggestion: "Run `envsync scan` to list them; symbolic links are never followed.",
+      });
+    } else {
+      checks.push({ id: "source-files", status: "pass", message: `Found ${files} to scan.` });
+    }
   } catch (error) {
     if (!(error instanceof DiscoveryError)) throw error;
     checks.push({ id: "source-files", status: "fail", message: error.message });
@@ -186,7 +207,9 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
     .sort();
 
   const context = await loadIgnoreContext(root, ceiling === undefined ? {} : { ceiling });
-  if (context.repositoryRoot === null) {
+  // "Not in a repository" is only reported when EnvSync is sure: a `.git` it could not verify on the
+  // way up means the project may be inside a repository, which the checks below report as unknown.
+  if (context.repositoryRoot === null && context.problems.length === 0) {
     return {
       id: "env-files-ignored",
       status: "skip",
@@ -206,8 +229,9 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
   const facts = present.map((name) => {
     const ignore = explainIgnoreStatus(context, root, name);
     for (const reason of ignore.reasons) unknownReasons.add(reason);
-    const tracked = isTrackedFile(context, root, name);
-    if (tracked === undefined && context.tracked.status !== "ok") unknownReasons.add(context.tracked.reason);
+    // Every undetermined tracking answer carries its own reason, so it can never fall through to a pass.
+    const { tracked, reason } = explainTrackedFile(context, root, name);
+    if (tracked === undefined) unknownReasons.add(reason);
     return { name, local: isLocal(name), tracked, ignore: ignore.status };
   });
 
@@ -234,12 +258,15 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
     };
   }
 
+  // Warnings below still mention anything that could not be verified, so it is never hidden.
+  const alsoUnverified = () => (unknownReasons.size > 0 ? ` Also could not verify: ${[...unknownReasons].join("; ")}.` : "");
+
   const sharedExposed = facts.filter((fact) => !fact.local && (fact.tracked === true || fact.ignore === "not-ignored")).map((fact) => fact.name);
   if (sharedExposed.length > 0) {
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: `${list(sharedExposed)} ${verb(sharedExposed, "is", "are")} committed or not ignored by git. Next.js allows committing these for non-secret defaults only.`,
+      message: `${list(sharedExposed)} ${verb(sharedExposed, "is", "are")} committed or not ignored by git. Next.js allows committing these for non-secret defaults only.${alsoUnverified()}`,
       suggestion: "Make sure they contain no secrets, or add them to .gitignore.",
     };
   }
@@ -249,7 +276,7 @@ async function checkLocalEnvFiles(root: string, ceiling: string | undefined): Pr
     return {
       id: "env-files-ignored",
       status: "warn",
-      message: ".env.local would not be ignored by git if you created it.",
+      message: `.env.local would not be ignored by git if you created it.${alsoUnverified()}`,
       suggestion: "Add `.env*.local` to .gitignore before creating local env files.",
     };
   }

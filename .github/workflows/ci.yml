@@ -59,7 +59,10 @@ jobs:
       # Runs the real binary through Node's package resolution (not Vitest's aliases). The drift
       # fixture must report findings: exit 1 is the expected result, while 0 or 2 fail the step.
       - name: Smoke-test the built CLI
-        run: node apps/cli/dist/bin.js scan tests/fixtures/next-pages-router --format json > /dev/null || test $? -eq 1
+        run: |
+          rc=0
+          node apps/cli/dist/bin.js scan tests/fixtures/next-pages-router --format json > /dev/null || rc=$?
+          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 (findings), got $rc"; exit 1; fi
         shell: bash
 
       # The publishable artifact, staged outside the checkout: exactly five files, one bundled
@@ -77,13 +80,18 @@ jobs:
           tar -tzf "$tarball" | LC_ALL=C sort > contents.txt
           printf '%s\n' package/CHANGELOG.md package/LICENSE package/README.md package/dist/envsync.js package/package.json | LC_ALL=C sort > expected.txt
           diff expected.txt contents.txt
-          # Code and manifest only: the CHANGELOG legitimately mentions the internal scope.
-          if tar -xzOf "$tarball" package/dist/envsync.js package/package.json | grep -q '@envsync-internal'; then echo "internal package name leaked into the package"; exit 1; fi
+          # Code and manifest only: the CHANGELOG legitimately mentions the internal scope. Extracted to
+          # a file first: in a pipe, an early `grep -q` match makes tar fail with SIGPIPE, and with
+          # pipefail the `if` would then take the "no leak" branch.
+          tar -xzOf "$tarball" package/dist/envsync.js package/package.json > shipped-code.txt
+          if grep -q '@envsync-internal' shipped-code.txt; then echo "internal package name leaked into the package"; exit 1; fi
           # Install the tarball like a user would, in a fresh project outside the checkout.
           mkdir consumer
           cd consumer
           npm init --yes > /dev/null
           npm install --ignore-scripts --no-audit --no-fund "../$tarball"
           npx --no-install envsync --version
-          npx --no-install envsync scan "$workspace/tests/fixtures/next-pages-router" --format json > /dev/null || test $? -eq 1
+          rc=0
+          npx --no-install envsync scan "$workspace/tests/fixtures/next-pages-router" --format json > /dev/null || rc=$?
+          if [ "$rc" -ne 1 ]; then echo "expected exit code 1 (findings), got $rc"; exit 1; fi
         shell: bash

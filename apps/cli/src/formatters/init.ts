@@ -31,7 +31,9 @@ export function formatInitPlan(plan: InitPlan, written: readonly string[] | null
       `Note: ${plan.dynamicAccessCount} dynamic process.env ${plan.dynamicAccessCount === 1 ? "access" : "accesses"} could not be resolved to names; declare those variables by hand.`,
     );
   }
-  if (plan.notScanned > 0) {
+  if (plan.stoppedAtLimit) {
+    lines.push("Note: scanning stopped at a resource limit, so many files were not scanned and this plan is incomplete. Run init on each app directory separately.");
+  } else if (plan.notScanned > 0) {
     lines.push(
       `Note: ${plan.notScanned} ${plan.notScanned === 1 ? "path was" : "paths were"} not scanned (run \`envsync scan\` to list them), so some variables may be missing from this plan.`,
     );

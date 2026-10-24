@@ -2,14 +2,19 @@
  * Git-compatible wildmatch for `.gitignore` patterns (the `WM_PATHNAME` mode git uses for ignore
  * rules), implemented without regular expressions.
  *
- * Like git, it works on UTF-8 bytes, not characters: `?` matches one byte, classes compare byte
- * values, and case folding (`core.ignorecase`) applies to ASCII letters only.
+ * Like git, it works on UTF-8 bytes, not characters: `?` matches one byte and classes compare byte
+ * values. Case folding (`core.ignorecase`) is chosen per match, so callers can evaluate both
+ * settings when the effective value is unknown, and it reproduces git's asymmetry exactly:
+ * - the path's ASCII upper-case letters are folded to lower case;
+ * - plain pattern letters are folded too, but letters written after a backslash (`\E`) and single
+ *   class members (`[E]`) are compared as written, so they never match a folded path letter;
+ * - a class range also accepts the upper-case form of a lower-case path letter.
  *
  * Patterns are compiled to tokens and matched by tracking the set of reachable byte positions, so
  * each token costs O(text length): matching is O(pattern × text) for any input, and hostile
  * patterns such as `*a*a*a*a*b` cannot cause catastrophic backtracking.
  *
- * Semantics follow git's wildmatch.c:
+ * Semantics follow git's wildmatch.c and dir.c:
  * - `?`, `*` and `[...]` never match `/`.
  * - `**` is special only as a whole path segment: leading `**\/`, trailing `/**`, or `/**\/`.
  *   Elsewhere it behaves like `*`.
@@ -17,23 +22,29 @@
  *   POSIX classes like `[:alpha:]`. An unterminated class or invalid POSIX class makes the whole
  *   pattern match nothing, as in git.
  * - A trailing unescaped backslash makes the pattern match nothing.
- * Known deviation (documented): git strips a pattern's literal prefix before matching, which makes
- * e.g. `apps**\/x` also match `apps/web/x`; here it matches only within one segment, so this
- * rarely-used form errs towards "not ignored".
+ * - For path patterns (`compileGitPathPattern`), the literal prefix before the first wildcard is
+ *   compared separately and the rest is matched on its own, as git's `match_pathname` does. That
+ *   is why `apps**\/x` also matches `apps/web/x`: after the prefix, `**` starts the pattern.
  */
 
-type ClassItem = { from: number; to: number } | { posix: PosixClass };
+type ClassItem = { from: number; to: number; single: boolean } | { posix: PosixClass };
 type PosixClass = "alnum" | "alpha" | "blank" | "cntrl" | "digit" | "graph" | "lower" | "print" | "punct" | "space" | "upper" | "xdigit";
 
 type Token =
-  | { kind: "literal"; byte: number }
+  /** `escaped`: written after a backslash, so never case-folded (as in git). */
+  | { kind: "literal"; byte: number; escaped: boolean }
   | { kind: "any" } // ?
   | { kind: "star" } // * within one segment
   | { kind: "class"; negated: boolean; items: ClassItem[] }
   | { kind: "dirs" } // `**/`: zero or more whole directories ("", "a/", "a/b/", ...)
   | { kind: "rest" }; // `/**` tail: one or more bytes of anything
 
-export type CompiledPattern = { tokens: Token[]; matchesNothing: boolean; ignoreCase: boolean };
+export type CompiledPattern = {
+  tokens: Token[];
+  matchesNothing: boolean;
+  /** Path patterns only: bytes compared literally (folded when ignoring case) before `tokens`. */
+  literalPrefix?: Buffer;
+};
 
 const SLASH = 0x2f;
 const STAR = 0x2a;
@@ -48,17 +59,34 @@ const DASH = 0x2d;
 
 const POSIX_CLASSES = new Set<string>(["alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space", "upper", "xdigit"]);
 
-export function compileWildmatch(pattern: string, ignoreCase: boolean): CompiledPattern {
-  const tokens: Token[] = [];
-  const nothing = { tokens: [], matchesNothing: true, ignoreCase };
+/** Compiles a pattern matched against a whole string (git's basename matching). */
+export function compileWildmatch(pattern: string): CompiledPattern {
+  return compileBytes(Buffer.from(pattern, "utf8"));
+}
+
+/**
+ * Compiles a pattern matched against a `/`-separated path (git's `match_pathname`): the literal
+ * prefix up to the first `*`, `?`, `[` or `\` is compared on its own, then the rest is matched as
+ * an independent pattern.
+ */
+export function compileGitPathPattern(pattern: string): CompiledPattern {
   const bytes = Buffer.from(pattern, "utf8");
+  let prefixLength = 0;
+  while (prefixLength < bytes.length && !isWildcardByte(bytes[prefixLength] as number)) prefixLength++;
+  const compiled = compileBytes(bytes.subarray(prefixLength));
+  return prefixLength === 0 ? compiled : { ...compiled, literalPrefix: Buffer.from(bytes.subarray(0, prefixLength)) };
+}
+
+function compileBytes(bytes: Buffer): CompiledPattern {
+  const tokens: Token[] = [];
+  const nothing: CompiledPattern = { tokens: [], matchesNothing: true };
   let i = 0;
 
   while (i < bytes.length) {
     const byte = bytes[i] as number;
     if (byte === BACKSLASH) {
       if (i + 1 >= bytes.length) return nothing;
-      tokens.push({ kind: "literal", byte: bytes[i + 1] as number });
+      tokens.push({ kind: "literal", byte: bytes[i + 1] as number, escaped: true });
       i += 2;
     } else if (byte === QUESTION) {
       tokens.push({ kind: "any" });
@@ -68,7 +96,9 @@ export function compileWildmatch(pattern: string, ignoreCase: boolean): Compiled
       while (bytes[end] === STAR) end++;
       const starCount = end - i;
       const atSegmentStart = i === 0 || bytes[i - 1] === SLASH;
-      const atSegmentEnd = end === bytes.length || bytes[end] === SLASH;
+      // git also accepts an escaped slash (`\/`) as the end of the segment.
+      const escapedSlash = bytes[end] === BACKSLASH && bytes[end + 1] === SLASH;
+      const atSegmentEnd = end === bytes.length || bytes[end] === SLASH || escapedSlash;
       if (starCount >= 2 && atSegmentStart && atSegmentEnd) {
         if (end === bytes.length) {
           // `**` at the very end: after a `/` it means "everything inside"; alone it matches anything.
@@ -78,7 +108,7 @@ export function compileWildmatch(pattern: string, ignoreCase: boolean): Compiled
         } else {
           // `**/` (leading or after `/`): zero or more directories.
           tokens.push({ kind: "dirs" });
-          i = end + 1;
+          i = end + (escapedSlash ? 2 : 1);
         }
       } else {
         tokens.push({ kind: "star" });
@@ -90,39 +120,50 @@ export function compileWildmatch(pattern: string, ignoreCase: boolean): Compiled
       tokens.push(parsed.token);
       i = parsed.next;
     } else {
-      tokens.push({ kind: "literal", byte });
+      tokens.push({ kind: "literal", byte, escaped: false });
       i++;
     }
   }
-  return { tokens: collapse(tokens), matchesNothing: false, ignoreCase };
+  return { tokens: collapse(tokens), matchesNothing: false };
 }
 
-/** Whether `text` (a `/`-separated relative path or a base name) matches the compiled pattern. */
-export function wildmatch(compiled: CompiledPattern, text: string): boolean {
+/** Whether `text` matches; `ignoreCase` applies git's `WM_CASEFOLD` rules (see the file comment). */
+export function wildmatch(compiled: CompiledPattern, text: string, ignoreCase: boolean): boolean {
   if (compiled.matchesNothing) return false;
-  const bytes = Buffer.from(text, "utf8");
+  let bytes: Buffer = Buffer.from(text, "utf8");
+
+  if (compiled.literalPrefix) {
+    const prefix = compiled.literalPrefix;
+    if (prefix.length > bytes.length) return false;
+    for (let i = 0; i < prefix.length; i++) {
+      const a = prefix[i] as number;
+      const b = bytes[i] as number;
+      if (ignoreCase ? foldAscii(a) !== foldAscii(b) : a !== b) return false;
+    }
+    bytes = bytes.subarray(prefix.length);
+    if (compiled.tokens.length === 0) return bytes.length === 0;
+  }
+
   const n = bytes.length;
-  const fold = (byte: number) => (compiled.ignoreCase ? foldAscii(byte) : byte);
+  // The path is folded once; pattern bytes are folded (or not) per token, as git does.
+  const text8 = ignoreCase ? Uint8Array.from(bytes, foldAscii) : bytes;
   let reachable = new Uint8Array(n + 1);
   reachable[0] = 1;
 
   for (const token of compiled.tokens) {
     const next = new Uint8Array(n + 1);
-    let any = false;
     switch (token.kind) {
       case "literal": {
-        const expected = fold(token.byte);
-        for (let p = 0; p < n; p++) {
-          if (reachable[p] && fold(bytes[p] as number) === expected) next[p + 1] = 1;
-        }
+        const expected = ignoreCase && !token.escaped ? foldAscii(token.byte) : token.byte;
+        for (let p = 0; p < n; p++) if (reachable[p] && text8[p] === expected) next[p + 1] = 1;
         break;
       }
       case "any":
-        for (let p = 0; p < n; p++) if (reachable[p] && bytes[p] !== SLASH) next[p + 1] = 1;
+        for (let p = 0; p < n; p++) if (reachable[p] && text8[p] !== SLASH) next[p + 1] = 1;
         break;
       case "class":
         for (let p = 0; p < n; p++) {
-          if (reachable[p] && bytes[p] !== SLASH && classMatches(token, bytes[p] as number, compiled.ignoreCase)) next[p + 1] = 1;
+          if (reachable[p] && text8[p] !== SLASH && classMatches(token, text8[p] as number, ignoreCase)) next[p + 1] = 1;
         }
         break;
       case "star": {
@@ -131,7 +172,7 @@ export function wildmatch(compiled: CompiledPattern, text: string): boolean {
         for (let p = 0; p <= n; p++) {
           if (reachable[p]) open = true;
           if (open) next[p] = 1;
-          if (bytes[p] === SLASH) open = false;
+          if (text8[p] === SLASH) open = false;
         }
         break;
       }
@@ -143,7 +184,7 @@ export function wildmatch(compiled: CompiledPattern, text: string): boolean {
             seen = true;
             next[p] = 1;
           }
-          if (seen && p > 0 && bytes[p - 1] === SLASH) next[p] = 1;
+          if (seen && p > 0 && text8[p - 1] === SLASH) next[p] = 1;
         }
         break;
       }
@@ -157,8 +198,7 @@ export function wildmatch(compiled: CompiledPattern, text: string): boolean {
         break;
       }
     }
-    for (let p = 0; p <= n && !any; p++) any = next[p] === 1;
-    if (!any) return false; // nothing reachable: no later token can match
+    if (!next.includes(1)) return false; // nothing reachable: no later token can match
     reachable = next;
   }
   return reachable[n] === 1;
@@ -193,7 +233,7 @@ function parseClass(bytes: Buffer, start: number): { token: Token; next: number 
       const close = findPosixEnd(bytes, i + 2);
       if (close === -1) {
         // Not a POSIX class after all: `[` is a literal member.
-        items.push({ from: OPEN_BRACKET, to: OPEN_BRACKET });
+        items.push({ from: OPEN_BRACKET, to: OPEN_BRACKET, single: true });
         i++;
         continue;
       }
@@ -217,10 +257,10 @@ function parseClass(bytes: Buffer, start: number): { token: Token; next: number 
         to = bytes[i + 3] as number;
         skip = 4;
       }
-      items.push({ from: byte, to });
+      items.push({ from: byte, to, single: false });
       i += skip;
     } else {
-      items.push({ from: byte, to: byte });
+      items.push({ from: byte, to: byte, single: true });
       i++;
     }
   }
@@ -235,12 +275,22 @@ function findPosixEnd(bytes: Buffer, from: number): number {
   return -1;
 }
 
+/** `byte` is the path byte, already folded to lower case when ignoring case. */
 function classMatches(token: Extract<Token, { kind: "class" }>, byte: number, ignoreCase: boolean): boolean {
-  // Case folding in classes: ASCII letters only, tried in both cases (as git's WM_CASEFOLD does).
-  const candidates = ignoreCase && isAsciiLetter(byte) ? [byte, byte ^ 0x20] : [byte];
-  const hit = token.items.some((item) =>
-    "posix" in item ? candidates.some((c) => posixMatches(item.posix, c)) : candidates.some((c) => c >= item.from && c <= item.to),
-  );
+  const isLower = byte >= 0x61 && byte <= 0x7a;
+  const hit = token.items.some((item) => {
+    if ("posix" in item) {
+      // git: with case folding, [:upper:] also accepts a lower-case (folded) letter.
+      return posixMatches(item.posix, byte) || (ignoreCase && item.posix === "upper" && isLower);
+    }
+    // Single members are compared as written (never folded), exactly like git.
+    if (item.single) return byte === item.from;
+    // git compares a range start as a single member first, so even a reversed range like [e-a]
+    // matches its first character.
+    if (byte === item.from || (byte >= item.from && byte <= item.to)) return true;
+    const upper = byte - 0x20;
+    return ignoreCase && isLower && upper >= item.from && upper <= item.to;
+  });
   return hit !== token.negated;
 }
 
@@ -268,7 +318,8 @@ function posixMatches(name: PosixClass, byte: number): boolean {
     case "punct":
       return byte > 0x20 && byte < 0x7f && !isDigit && !isUpper && !isLower;
     case "space":
-      return byte === 0x20 || (byte >= 0x09 && byte <= 0x0d);
+      // git's isspace: space, tab, LF and CR only (not vertical tab or form feed).
+      return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
     case "upper":
       return isUpper;
     case "xdigit":
@@ -276,8 +327,8 @@ function posixMatches(name: PosixClass, byte: number): boolean {
   }
 }
 
-function isAsciiLetter(byte: number): boolean {
-  return (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a);
+function isWildcardByte(byte: number): boolean {
+  return byte === STAR || byte === QUESTION || byte === OPEN_BRACKET || byte === BACKSLASH;
 }
 
 function foldAscii(byte: number): number {

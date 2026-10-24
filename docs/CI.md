@@ -33,7 +33,9 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           npm_config_registry: https://registry.npmjs.org/
-        # --strict fails the job on warnings too. Drop it to fail only on errors.
+        # --strict also fails on warnings and on an incomplete scan (any path not scanned).
+        # Drop it to fail only on errors. This step uses bash syntax ("$GITHUB_WORKSPACE"); on a
+        # Windows runner set `shell: bash` or use "$env:GITHUB_WORKSPACE" in PowerShell.
         run: npx --yes envsync@<version> scan "$GITHUB_WORKSPACE" --strict
 ```
 
@@ -59,7 +61,7 @@ jobs:
 | Code | Meaning in CI |
 |---|---|
 | `0` | Configuration is consistent. |
-| `1` | Findings: errors, or warnings with `--strict`. Fix them or adjust the contract. |
+| `1` | Findings: errors, or with `--strict` also warnings or an incomplete scan (`summary.complete: false`; the skipped paths are listed). Fix them or adjust the contract. |
 | `2` | EnvSync could not run (for example, missing `envsync.config.ts`). Treat it as a setup failure. |
 
 `envsync doctor` is meant for local setup; it is not needed in CI.
