@@ -37,7 +37,8 @@ export async function makeMinimalGitDirectory(root: string): Promise<string> {
 
 export type CliRun = { exitCode: number; stdout: string; stderr: string };
 
-export async function runCli(args: string[], cwd: string): Promise<CliRun> {
+/** `ci` defaults to false so results do not depend on whether the tests themselves run in CI. */
+export async function runCli(args: string[], cwd: string, { ci = false }: { ci?: boolean } = {}): Promise<CliRun> {
   let stdout = "";
   let stderr = "";
   const exitCode = await main(args, {
@@ -48,6 +49,7 @@ export async function runCli(args: string[], cwd: string): Promise<CliRun> {
       stderr += text;
     },
     cwd,
+    ci,
   });
   return { exitCode, stdout, stderr };
 }

@@ -1,8 +1,9 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import path from "node:path";
+import { parseEnvFile, type ParsedEnvFile } from "@envsync-internal/schema";
 import type { FileExposures, FileReferences } from "./analyze.js";
-import { discoverSourceFiles } from "./discovery.js";
+import { discoverSourceFiles, isRuntimeEnvFile } from "./discovery.js";
 import type { FrameworkAdapter } from "./framework.js";
 
 /** Shared, read-only access to project files for scan, init and doctor. */
@@ -28,39 +29,79 @@ export class ScanError extends Error {
 export type SkippedPath = {
   path: string;
   /** `limit-reached` is recorded once, at the first file not scanned because a scan limit was hit. */
-  reason: "symlink" | "unreadable" | "too-large" | "parse-failed" | "limit-reached";
+  reason: "symlink" | "unreadable" | "too-large" | "parse-failed" | "limit-reached" | "unsupported-encoding";
 };
+
+/** A UTF-16 byte-order mark, or NUL bytes (UTF-16 text without a BOM, or not text at all). */
+function isProbablyUtf16(bytes: Buffer): boolean {
+  if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) return true;
+  return bytes.subarray(0, 4096).includes(0);
+}
 
 export type ScanLimits = { maxFiles: number; maxTotalBytes: number };
 
 /** Bounds work on hostile or enormous trees; documented in docs/CLI.md ("Resource limits"). */
 export const DEFAULT_SCAN_LIMITS: ScanLimits = { maxFiles: 20_000, maxTotalBytes: 200_000_000 };
 
+/** A runtime env file, parsed with its values. */
+export type EnvFileEvidence = { file: string; parsed: ParsedEnvFile };
+
 export type SourceEvidence = {
   references: FileReferences[];
   exposures: FileExposures[];
+  /** Empty unless `readEnvFiles` was requested. */
+  envFiles: EnvFileEvidence[];
   filesScanned: number;
   skipped: SkippedPath[];
 };
 
-/** Discovers and parses source files. Never reads `.env*` files or the EnvSync config as source. */
+/**
+ * Discovers and parses source files, and with `readEnvFiles` also reads runtime env files (values
+ * included). Without it, env files are never opened and links to them are not reported as skipped.
+ * The EnvSync config is never read as source.
+ */
 export async function collectSourceEvidence(
   absoluteRoot: string,
   framework: FrameworkAdapter,
   limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+  { readEnvFiles = false }: { readEnvFiles?: boolean } = {},
 ): Promise<SourceEvidence> {
   const discovery = await discoverSourceFiles(absoluteRoot);
-  const skipped: SkippedPath[] = [...discovery.skipped];
+  const skipped: SkippedPath[] = discovery.skipped.filter((entry) => readEnvFiles || !isRuntimeEnvFile(path.posix.basename(entry.path)));
   const references: FileReferences[] = [];
   const exposures: FileExposures[] = [];
+  const envFiles: EnvFileEvidence[] = [];
   let filesScanned = 0;
   let filesRead = 0;
   let totalBytes = 0;
+  const atLimit = () => filesRead >= limits.maxFiles || totalBytes >= limits.maxTotalBytes;
+
+  for (const file of readEnvFiles ? discovery.envFiles : []) {
+    if (atLimit()) {
+      skipped.push({ path: file, reason: "limit-reached" });
+      break;
+    }
+    const read = await readRegularFileBytes(path.join(absoluteRoot, file));
+    filesRead++;
+    if (!read.ok) {
+      skipped.push({ path: file, reason: read.reason === "too-large" ? "too-large" : "unreadable" });
+      continue;
+    }
+    totalBytes += read.bytes.length;
+    // Some Windows editors save UTF-16. Decoded as UTF-8 it would parse as noise, so it is reported
+    // as not scanned instead of producing findings (or none) from garbage.
+    if (isProbablyUtf16(read.bytes)) {
+      skipped.push({ path: file, reason: "unsupported-encoding" });
+      continue;
+    }
+    envFiles.push({ file, parsed: parseEnvFile(read.bytes.toString("utf8")) });
+  }
 
   for (const file of discovery.files) {
     if (file === CONFIG_FILE_NAME) continue;
-    if (filesRead >= limits.maxFiles || totalBytes >= limits.maxTotalBytes) {
-      skipped.push({ path: file, reason: "limit-reached" });
+    if (atLimit()) {
+      // Recorded once: env files already stopped at the limit.
+      if (!skipped.some((entry) => entry.reason === "limit-reached")) skipped.push({ path: file, reason: "limit-reached" });
       break;
     }
     const absolutePath = path.join(absoluteRoot, file);
@@ -89,6 +130,7 @@ export async function collectSourceEvidence(
   return {
     references,
     exposures,
+    envFiles,
     filesScanned,
     skipped: skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
   };

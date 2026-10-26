@@ -50,7 +50,12 @@ jobs:
 - **Pin versions.** Pin EnvSync to an exact version and pin actions to commit SHAs (as above), so
   a compromised tag cannot change what runs in CI.
 - **Do not upload env files.** Never add `.env*` files as workflow artifacts. If you keep the JSON
-  report as an artifact, it contains variable names and file locations but never values.
+  report as an artifact, it contains variable names and file locations but no values, as long as
+  you do not pass `--show-values`. In CI, `--show-values` is ignored (EnvSync checks the `CI`
+  environment variable), and credentials are never printed anywhere.
+- **Env files in CI.** `scan` reads runtime `.env*` files by default. CI checkouts normally have
+  none (they should be gitignored), so value checks (ENV008-ENV010) only run if a workflow
+  creates one. Use `--env production` or `--env preview` to check against that environment's files; add `--no-env-files` if a step writes env files you do not want checked.
 - **Pull requests from forks** run with read-only tokens by default; keep it that way. EnvSync does
   not need `pull_request_target`.
 - **Monorepos.** Run one step per Next.js app:

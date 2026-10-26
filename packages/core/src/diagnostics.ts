@@ -1,15 +1,19 @@
 /**
- * Public diagnostic model. Codes and the JSON shape are a public contract:
+ * Public diagnostic model. Codes and the JSON shape are a public contract (ADR-003):
  * do not rename, repurpose or remove a code once released.
  */
 
-export const DIAGNOSTIC_CODES = ["ENV001", "ENV002", "ENV003", "ENV004", "ENV005", "ENV006", "ENV007"] as const;
+export const DIAGNOSTIC_CODES = ["ENV001", "ENV002", "ENV003", "ENV004", "ENV005", "ENV006", "ENV007", "ENV008", "ENV009", "ENV010", "ENV011"] as const;
 
 export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
 
 export type Severity = "error" | "warning" | "info";
 
-/** Never carries an environment-variable value. `file` is root-relative with `/` separators. */
+/**
+ * `file` is root-relative with `/` separators. `value` is set only on findings about a value read
+ * from a runtime env file (ENV005, ENV010), only when the caller asked for values (`includeValues`), and
+ * then as a redaction marker unless the value is a malformed, non-private one (ADR-016).
+ */
 export type Diagnostic = {
   code: DiagnosticCode;
   severity: Severity;
@@ -19,6 +23,9 @@ export type Diagnostic = {
   column?: number;
   variableName?: string;
   suggestion?: string;
+  value?: string;
+  /** True when `value` is a redaction marker, not the value itself (ADR-016). */
+  valueRedacted?: boolean;
 };
 
 export type SeverityCounts = { errors: number; warnings: number; infos: number };

@@ -1,11 +1,35 @@
 # Changelog
 
 All notable changes to EnvSync are documented here. Diagnostic codes, exit codes and the JSON
-output shape are public contracts; changes to them are called out explicitly.
+output shape are public contracts (ADR-003); changes to them are called out explicitly.
 
 ## [Unreleased]
 
+### Changed (security boundary)
+- `scan` now reads every runtime env file in the project by default (`.env`, `.env.*` at any
+  depth, except example/sample/template/vault/keys files) and checks values in memory. Use
+  `--no-env-files` for the previous behaviour. Values are never in messages. `--show-values` shows only a
+  malformed value of a non-private variable; credentials and `secret`/`sensitive` values are always
+  redacted, and the flag is ignored in CI (`CI` or a known CI provider's variable). Redaction markers give a
+  length range, never the exact length. Values containing `@` or `://` are always redacted. `init` and `doctor` still never open env files.
+- Only env files in the project root are checked against the config; files elsewhere (for
+  example another app in a monorepo) are checked for credential exposure and repeated names only.
+- A symlinked runtime env file now makes the scan incomplete (it is not followed).
+
 ### Added
+- `scan --env development|preview|production|test`: ENV008 uses the files Next.js loads for that
+  context (preview: `.env.preview*` over `.env.production`); `info` when a deployed context has no
+  file of its own.
+- `visibility: "plain" | "sensitive" | "secret"` config field (`secret` remains as shorthand).
+- UTF-16 env files are reported as not scanned (`unsupported-encoding`).
+- Env files accept dotenv's `KEY: value` form; root env file names match case-insensitively.
+- ENV011 (warning): a `.env.example` entry that is not declared in the config.
+- ENV008 (required variable has no value in the selected context's env files), ENV009 (set in an env file but not
+  declared), ENV010 (value does not match the declared `type`); ENV005 also flags client-visible
+  variables whose value matches a known credential format; ENV007 also flags a name set twice in
+  one env file.
+- JSON (additive, schema version 1): `summary.envFilesRead`, `summary.envContext`, top-level
+  `envFiles`, and diagnostic `value`/`valueRedacted` (only with `--show-values`).
 - `envsync scan` with terminal and JSON output (`schemaVersion: 1`), `--strict`, and exit codes
   0 (clean), 1 (findings), 2 (usage error or could not run).
 - Diagnostics ENV001–ENV007: undeclared reference, required variable missing from `.env.example`,
@@ -24,7 +48,7 @@ output shape are public contracts; changes to them are called out explicitly.
 
 ### Security
 - Internal workspace packages renamed to `@envsync-internal/*` and bundled into the CLI, because the `@envsync` npm scope is owned by a third party (dependency-confusion risk).
-- Never reads `.env`/`.env.*` values, never executes project code, makes no network requests;
+- `init` and `doctor` never read `.env`/`.env.*` values; `scan` reads them only as described above. Never executes project code, makes no network requests;
   enforced by tests, including a static check that shipped code uses no evaluation, process or
   network APIs.
 - Symlinks are never followed; oversized files are skipped; terminal/JSON output escapes control
@@ -65,9 +89,9 @@ output shape are public contracts; changes to them are called out explicitly.
     limit, gives `unknown` instead of `skip`. `HEAD` is checked like git (first 255 bytes,
     `ref:` + space/tab/CR/LF, 40+ hex digits in any case).
   - Case folding reproduces git's asymmetry (escaped letters and single class members are not
-    folded), reversed class ranges match their first character like git, and anchored patterns use
-    git's literal-prefix split, so `!apps**/.env.local`, `.[E]nv.local` and `!.[e-a]nv.local` no
-    longer produce a false pass.
+    folded) and reversed class ranges match their first character like git, so `.[E]nv.local` and
+    `!.[e-a]nv.local` no longer produce a false pass. Patterns like `apps**/.env.local`, which older
+    and newer git versions match differently, are `unknown` when the two behaviours disagree.
   - `core.ignorecase` is only trusted from an exact `[core]` section of a fully parsed
     `.git/config`; otherwise both settings are evaluated and a result that depends on it is
     `unknown`. A tracked file whose name differs only by letter case is `unknown` unless

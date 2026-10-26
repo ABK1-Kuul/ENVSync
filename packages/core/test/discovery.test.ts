@@ -218,7 +218,8 @@ describe("discoverSourceFiles", () => {
     try {
       await link("logo.png", "logo.png", "file");
       await link("x.ts", "linked.ts", "file");
-      await link("x.ts", ".env.local", "file");
+      await link("x.ts", ".env.local", "file"); // runtime env files are read by scan
+      await link("x.ts", ".env.example", "file"); // has its own reader, which refuses links itself
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
       fileLinks = false; // file symlinks need Developer Mode on Windows; directory cases still run
@@ -227,8 +228,30 @@ describe("discoverSourceFiles", () => {
     const result = await discoverSourceFiles(root);
     expect(result.files).toEqual(["src/a.ts"]);
     expect(result.skipped.map((entry) => entry.path)).toEqual(
-      fileLinks ? ["api.v2", "app/[...slug]", "linked-src", "linked.ts"] : ["api.v2", "app/[...slug]", "linked-src"],
+      fileLinks ? [".env.local", "api.v2", "app/[...slug]", "linked-src", "linked.ts"] : ["api.v2", "app/[...slug]", "linked-src"],
     );
+  });
+
+  test("lists runtime env files at any depth, separately from source, and skips documentation and excluded directories", async () => {
+    await writeTree(root, {
+      ".env": "",
+      ".env.local": "",
+      ".env.production": "",
+      ".ENV.Development.Local": "",
+      "apps/web/.env": "",
+      ".env.example": "",
+      ".env.sample": "",
+      ".env.template": "",
+      ".env.vault": "",
+      ".env.keys": "",
+      ".envrc": "",
+      "env.ts": "",
+      "node_modules/pkg/.env": "",
+      "dist/.env": "",
+    });
+    const result = await discoverSourceFiles(root);
+    expect(result.envFiles).toEqual([".ENV.Development.Local", ".env", ".env.local", ".env.production", "apps/web/.env"]);
+    expect(result.files).toEqual(["env.ts"]);
   });
 
   test("stops at the entry limit, records it once, and is deterministic", async () => {
@@ -236,7 +259,7 @@ describe("discoverSourceFiles", () => {
 
     // Root entries in sorted order: a.ts, b.ts, c/, f.ts. The 4th entry hits a limit of 3.
     const first = await discoverSourceFiles(root, 3);
-    expect(first).toEqual({ files: ["a.ts", "b.ts"], skipped: [{ path: "f.ts", reason: "limit-reached" }] });
+    expect(first).toEqual({ files: ["a.ts", "b.ts"], envFiles: [], skipped: [{ path: "f.ts", reason: "limit-reached" }] });
     expect(await discoverSourceFiles(root, 3)).toEqual(first);
 
     expect((await discoverSourceFiles(root, 100)).skipped).toEqual([]);

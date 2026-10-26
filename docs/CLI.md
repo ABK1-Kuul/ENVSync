@@ -13,7 +13,7 @@ node apps/cli/dist/bin.js scan path/to/next-app
 ## `envsync scan`
 
 ```
-envsync scan [directory] [--format terminal|json] [--strict]
+envsync scan [directory] [--format terminal|json] [--strict] [--env <context>] [--no-env-files] [--show-values]
 ```
 
 | Option | Meaning |
@@ -22,15 +22,50 @@ envsync scan [directory] [--format terminal|json] [--strict]
 | `--format terminal` | Human-readable output (default). |
 | `--format json` | Machine-readable output; see [JSON output](#json-output). |
 | `--strict` | Warnings also cause exit code 1. |
+| `--env <context>` | Environment whose env files decide missing values (ENV008): `development` (default), `preview`, `production` or `test`. See [Environments](#environments). |
+| `--no-env-files` | Do not open runtime env files (no ENV008-ENV010 or value-based ENV005/ENV007 findings). |
+| `--show-values` | Add the offending value to ENV005/ENV010 findings (`Value:` line in terminal output, `value` field in JSON). Only a malformed value of a variable that is not private is shown as-is. Credential-shaped values, anything containing `@` or `://` (a malformed connection URL may still hold a password), `secret`/`sensitive` variables and private-looking names (containing `SECRET`, `PASS`, `PWD`, `TOKEN`, `KEY`, `AUTH`, `PRIVATE`, `CREDENTIAL`, `SALT`, `DSN`, `JWT`, `SIGN`, `CERT`, `SESSION` or `COOKIE`) are always replaced by a marker such as `<redacted: a Stripe secret or restricted key, more than 64 characters>`, which gives only a length range. Ignored, with a notice on stderr, in CI: when `CI` is set, or a CI provider's variable is (`GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `TF_BUILD`, `JENKINS_URL`, `CODEBUILD_BUILD_ID`, `TEAMCITY_VERSION`, `CIRCLECI`, `BITBUCKET_BUILD_NUMBER`). |
 | `-h`, `--help` | Show usage. |
 | `-v`, `--version` | Show the version. |
 
-What a scan reads: `envsync.config.ts`, `.env.example`, and source files
-(`.ts .tsx .js .jsx .mjs .cjs .mts .cts`, excluding `*.d.ts`) under the root.
+What a scan reads: `envsync.config.ts`, `.env.example`, source files
+(`.ts .tsx .js .jsx .mjs .cjs .mts .cts`, excluding `*.d.ts`) under the root, and, unless
+`--no-env-files` is passed, every runtime env file under the root: `.env` and `.env.*` at any
+depth (names compared case-insensitively), except `.env.example`, `.env.sample`, `.env.template`,
+`.env.vault` and `.env.keys`, and except inside the skipped directories below. Env files are
+parsed with dotenv's rules (`export`, `KEY=value` and `KEY: value`, comments, single/double/backtick
+quotes, multi-line quoted values, last assignment wins); their values are checked in memory. Env files must be UTF-8;
+a UTF-16 file is listed as not scanned (`unsupported-encoding`).
 
-What a scan never does: read `.env` or `.env.*` files (other than `.env.example`), print any
-variable value, execute or import project code (including the config and `next.config.*`), follow
+What a scan never does: put a value in a message or suggestion, print any value without
+`--show-values`, print a credential or a private variable's value at all, store, copy or upload
+values, execute or import project code (including the config and `next.config.*`), follow
 symbolic links or junctions, or make network requests.
+
+### Environments
+
+Next.js loads env files only from the project root, so env files directly in the scanned
+directory are the app's own. They are checked against `envsync.config.ts` (ENV009, ENV010) and
+decide missing values (ENV008) for the selected context. Env files anywhere else, such as another
+app in a monorepo, are still read, but only checked for credentials in public variables (ENV005)
+and repeated names (ENV007).
+
+| `--env` | Files, highest priority first | Basis |
+|---|---|---|
+| `development` (default) | `.env.development.local`, `.env.local`, `.env.development`, `.env` | what `next dev` loads |
+| `production` | `.env.production.local`, `.env.local`, `.env.production`, `.env` | what `next build` / `next start` load |
+| `preview` | `.env.preview.local`, `.env.preview`, `.env.production`, `.env` | EnvSync convention: Next.js builds previews in production mode, so `.env.preview*` overrides the production defaults |
+| `test` | `.env.test.local`, `.env.test`, `.env` | what Next.js loads when `NODE_ENV=test` |
+
+The first file that sets a name decides its value; an empty value counts as missing. Root file
+names are matched case-insensitively (as Windows and macOS file systems do); an exact lower-case
+name wins over a variant. When none
+of a context's files exists, ENV008 is not reported, because values then come from the shell or
+the platform. For `production` and `preview`, if the project has no file specific to that
+environment (`.env.production[.local]`, `.env.preview[.local]`), ENV008 is `info` instead of
+`warning`: deployed values are expected to be set on the hosting platform. Commit only
+non-secret defaults (`.env`, `.env.development`, `.env.production`, `.env.preview`) and keep every
+`*.local` file gitignored.
 
 Skipped during discovery (case-insensitive): `.git`, `node_modules` and `.next` at any depth; the
 generated-output names `dist`, `build`, `out` and `coverage` at any depth **except** inside the
@@ -40,10 +75,10 @@ tree is identified relative to the directory you scan, so scan the Next.js app's
 
 Symbolic links are never followed. Because a link's target type is unknown without following it,
 a link counts as "not scanned" (and makes the scan incomplete) unless its name is clearly not
-scanned: an env file, an excluded directory name, a type declaration, or a known non-source
+read: a non-runtime env file (such as `.env.example`), an excluded directory name, a type declaration, or a known non-source
 extension (images, fonts, media, `.md`, `.json`, `.css`, `.yml`, archives, …). So a linked
-`node_modules`, `logo.png` or `.env.local` is ignored, while a linked `lib`, `api.v2` or
-`[...slug]` directory is reported. Unreadable directories, files over 1,000,000 bytes and files
+`node_modules` or `logo.png` is ignored, while a linked `.env.local`, `lib`, `api.v2` or
+`[...slug]` directory is reported (a linked env file only when env files are read). Unreadable directories, files over 1,000,000 bytes and files
 the parser cannot handle are listed too.
 
 ## `envsync init`
@@ -130,8 +165,10 @@ How the git checks work without running git:
 - **Ignore rules** come from `.gitignore` files between the project and the repository root plus
   `.git/info/exclude`, evaluated like git: LF line splitting, only trailing ASCII spaces trimmed,
   byte-wise wildmatch where `*`, `?` and `[...]` never match `/`, invalid patterns matching
-  nothing, and git's literal-prefix split for patterns containing `/` (so `apps**/.env.local`
-  matches across directories, as in git). Matching runs in linear time, so a hostile `.gitignore`
+  nothing. Git versions differ on one form: with `**` directly after other characters in a pattern
+  containing `/` (like `apps**/.env.local`), git 2.46 and older match across directories while
+  newer git (2.55 and later were tested) does not; EnvSync evaluates both and reports `unknown`
+  when they disagree. Matching runs in linear time, so a hostile `.gitignore`
   cannot hang `doctor`. If an ignore file that applies is oversized, unreadable, symlinked, or
   exceeds 10,000 rules / 4,096-character patterns, the result is `unknown`, never `ignored`.
 - **Case folding** follows git when `core.ignorecase` is on: path letters and plain pattern
@@ -164,7 +201,7 @@ JSON output: `{ "schemaVersion": 1, "summary": { "pass", "warn", "fail", "unknow
 
 ## Config file: `envsync.config.ts`
 
-The config is **parsed, never executed**: EnvSync never imports or runs project code. Only this literal subset is understood:
+The config is **parsed, never executed** (ADR-002, ADR-005). Only this literal subset is understood:
 
 ```ts
 export default {
@@ -187,9 +224,10 @@ export default {
 | Field | Values | Default | Used for |
 |---|---|---|---|
 | `required` | `true` / `false` | `true` | ENV002 |
-| `secret` | `true` / `false` | unspecified | ENV005 |
+| `secret` | `true` / `false` | unspecified | ENV005; `--show-values` redaction |
+| `visibility` | `"plain"`, `"sensitive"`, `"secret"` | unspecified | the same as `secret` (`"plain"` = `secret: false`, the others = `secret: true`), and the classification the cloud features will use. Setting both `secret` and a `visibility` that disagrees is ENV004. |
 | `external` | `true` / `false` | `false` | `true` suppresses ENV003 for variables read outside the scanned source (hosting platform, dependency, tooling) |
-| `type` | `"string"`, `"number"`, `"boolean"`, `"url"` | `"string"` | validated only (reserved for `init`) |
+| `type` | `"string"`, `"number"`, `"boolean"`, `"url"` | `"string"` | ENV010 (values in env files) |
 | `description` | string literal | none | validated only |
 
 Anything else (spreads, computed keys, function calls, variables, imports used as values, unknown
@@ -220,9 +258,16 @@ or tagged templates.
 | ENV007 | error | The same variable declared more than once in the config (identifier, quoted and computed-literal spellings count as the same name), or a repeated `variables` key. Each repeat is reported at its own location and refers to the first; the first declaration is used. |
 | ENV007 | warning | The same name appears more than once in `.env.example` (with or without `export`). Each repeat refers to the first line. |
 | ENV007 | warning | Two names in the config, or in `.env.example`, differ only by letter case (`API_URL` / `api_url`). They are distinct on Linux and macOS but collide on Windows. |
+| ENV007 | warning | The same name is set more than once in one runtime env file. The last assignment wins, as in dotenv. |
+| ENV005 | error | **Value-based:** a client-visible variable (public prefix or `next.config` `env`, not declared `secret: false`) has a value in a runtime env file that matches a known credential format: Stripe secret/restricted key, GitHub token, AWS access key ID, Slack token, OpenAI/Anthropic API key, private key block, or a connection string with a password (`user:password@host`, with or without a scheme; `mailto:` excluded). Checked in every env file found; the root config's `secret: false` exempts only the root app's own files. With `--show-values`, `value` holds only a redaction marker. |
+| ENV008 | warning | A `required` variable has no non-empty value in the selected context's files (see [Environments](#environments)). Only reported when at least one of those files exists; the value may still come from the shell or hosting platform. |
+| ENV008 | info | The same, for `--env production` or `preview` when the project has no file specific to that environment: the value is expected from the hosting platform. |
+| ENV009 | warning | An env file in the project root sets a variable that is not declared in the config (framework variables such as `NODE_ENV` and `PORT` excepted). Names from env files are untrusted: unless the name is declared, referenced in source or a framework variable, it is printed only if it is conventional (`UPPER_CASE` with at least one underscore, such as `API_URL`); otherwise the finding is reported by line only, without `variableName`, because the "name" may be part of a value (for example a base64 or base32 line of an unquoted multi-line key). The same applies to ENV007 for env files. Lines of an unquoted `-----BEGIN ...-----` block are skipped up to its `-----END` line. |
+| ENV010 | error | A value in an env file in the project root does not match the declared `type`: `number` (finite number), `boolean` (`true`, `false`, `1`, `0`, any case) or `url` (absolute URL with `scheme://`). Values containing `$` (unless single-quoted) are skipped, since Next.js may expand them. With `--show-values`, `value` holds the value only if it is not private and not credential-shaped; otherwise a redaction marker. |
+| ENV011 | warning | A variable listed in `.env.example` is not declared in the config (framework variables such as `NODE_ENV` and `PORT` excepted). Usually a stale example entry, or a variable used only by tooling or the platform: declare it (with `external: true` if nothing in the scanned source reads it) or remove the line. Names are shown only if known or conventional, as for ENV009. |
 
 Severity is part of the meaning: for ENV005, automation should treat `error` as a confirmed
-violation of the declared contract and `warning` as a heuristic. Duplicate detection runs on the
+violation of the declared contract (or a value in a known credential format) and `warning` as a heuristic. Duplicate detection runs on the
 AST / file lines in source order, before entries are merged. Exact duplicates are case-sensitive;
 case-only differences are reported separately as above.
 
@@ -239,7 +284,7 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 {
   "schemaVersion": 1,
   "summary": {
-    "errors": 1, "warnings": 0, "infos": 0, "filesScanned": 3,
+    "errors": 1, "warnings": 0, "infos": 0, "filesScanned": 3, "envFilesRead": 1, "envContext": "development",
     "complete": false, "dynamicAccesses": 0, "strict": false, "exitCode": 1
   },
   "diagnostics": [
@@ -254,14 +299,20 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
       "suggestion": "Add API_URL under `variables` in envsync.config.ts, or remove the reference if it is a mistake."
     }
   ],
+  "envFiles": [".env.local"],
   "skipped": [{ "path": "linked", "reason": "symlink" }]
 }
 ```
 
 - `file` is relative to the project root with `/` separators. `file`, `line`, `column`,
-  `variableName` and `suggestion` are omitted when not applicable.
+  `variableName` and `suggestion` are omitted when not applicable. `value` appears only on
+  ENV005/ENV010 findings about an env-file value, and only with `--show-values`; when it is a
+  redaction marker rather than the value, `valueRedacted` is `true`.
+- `envFiles` lists the runtime env files read (root-relative); `summary.envFilesRead` is its length.
+  `summary.envContext` is the context selected with `--env`.
 - `skipped[].reason` is one of `symlink`, `unreadable`, `too-large`, `parse-failed`,
-  `limit-reached` (see [Resource limits](#resource-limits)).
+  `limit-reached` (see [Resource limits](#resource-limits)), or `unsupported-encoding` (an env
+  file that is not UTF-8).
 - Diagnostics are sorted by file (project-level findings last), line, column, code and name.
 - Repository-controlled text is escaped as `\uXXXX` (surrogate pairs above U+FFFF) in every output
   format and on stderr: C0/C1 controls, DEL, soft hyphen, zero-width and invisible characters,
@@ -276,8 +327,9 @@ and `"NAME" in process.env`. Dynamic (ENV006): computed keys, `...rest` destruct
 - `summary.dynamicAccesses` counts ENV006 findings: places where variables are read dynamically
   and therefore not checked. It does not affect the exit code (dynamic access is a limit of static
   analysis, not an incomplete scan), but it is always shown, including in the terminal summary.
-- Contract changes within schema version 1 are additive only: `summary.complete` and
-  `summary.dynamicAccesses` (scan), and the `unknown` check status plus `summary.unknown` and
+- Contract changes within schema version 1 are additive only: `summary.complete`,
+  `summary.dynamicAccesses`, `summary.envFilesRead`, `summary.envContext`, `envFiles`, the
+  `unsupported-encoding` skip reason, and diagnostic `value`/`valueRedacted` (scan), and the `unknown` check status plus `summary.unknown` and
   `summary.strict` (doctor) were added before the first release. Consumers that switch on
   `status` should treat unrecognized values as "not a pass".
 - Messages are for humans; automation should rely on `code`, `severity` and location fields.
@@ -300,13 +352,12 @@ Hitting any limit is always disclosed and never reported as a clean, complete re
 - Only the project root's `envsync.config.ts`, `.env.example` and `next.config.*` are read; monorepo
   sub-apps must be scanned individually.
 - A local variable named `process` that shadows the global is not detected.
-- `.env.example` entries that are not declared in the config are not reported by `scan` yet
-  (this would need a new diagnostic code).
 - Malformed `.env.example` lines are ignored by `scan`; `doctor` reports them by line number.
-- `type` and `description` are validated but not yet used.
+- `type` is used only to check values in runtime env files (ENV010); `description` is validated but not yet used.
+- Env files outside the project root are only checked for credential exposure and repeated names; scan each app of a monorepo from its own directory to check its files against its config.
+- Next.js variable expansion (`$VAR`) is not performed; such values are not type-checked.
 - `scan` reports any string used as a `process.env["..."]` key as `variableName`, even if it is not
   a valid variable name.
 - `doctor` does not read the global git excludes file (see "Known deviations from git" above).
 - A process that swaps a project directory for a symlink *while* a command runs is not detected
   (file swaps are). This requires concurrent write access to the project.
-- Linting is not configured in this repository yet.

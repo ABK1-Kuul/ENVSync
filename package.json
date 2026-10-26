@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
     "build": "tsc -b tsconfig.build.json",
     "bundle": "pnpm --filter envsync run bundle",
     "stage": "pnpm --filter envsync run stage"
@@ -17,8 +18,11 @@
   "devDependencies": {
     "@envsync-internal/core": "workspace:*",
     "@envsync-internal/parser-next": "workspace:*",
+    "@eslint/js": "9.39.5",
     "@types/node": "22.20.5",
+    "eslint": "9.39.5",
     "typescript": "6.0.3",
+    "typescript-eslint": "8.71.1",
     "vitest": "5.0.3"
   },
   "license": "Apache-2.0"

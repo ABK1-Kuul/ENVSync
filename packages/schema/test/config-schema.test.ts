@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseConfigSource } from "../src/index.js";
+import { effectiveVisibility, parseConfigSource } from "../src/index.js";
 
 const issueSummary = (source: string) =>
   parseConfigSource(source).issues.map(({ kind, location, variableName }) => ({ kind, line: location?.line, variableName }));
@@ -246,5 +246,31 @@ export default config;`);
     // Even if defineConfig would transform its input at runtime, EnvSync reads only the literal argument.
     const result = parseConfigSource(`export default defineConfig({ variables: { A: {} } });`);
     expect(result).toEqual({ variables: [{ name: "A", required: true, type: "string", location: { line: 1, column: 44 } }], issues: [] });
+  });
+});
+
+describe("visibility", () => {
+  test("is parsed, and implies `secret` when only visibility is given", () => {
+    const { variables, issues } = parseConfigSource(
+      'export default { variables: { A: { visibility: "plain" }, B: { visibility: "sensitive" }, C: { visibility: "secret" }, D: { secret: true, visibility: "secret" } } };',
+    );
+    expect(issues).toEqual([]);
+    expect(variables.map(({ name, secret, visibility }) => ({ name, secret, visibility }))).toEqual([
+      { name: "A", secret: false, visibility: "plain" },
+      { name: "B", secret: true, visibility: "sensitive" },
+      { name: "C", secret: true, visibility: "secret" },
+      { name: "D", secret: true, visibility: "secret" },
+    ]);
+    expect(variables.map(effectiveVisibility)).toEqual(["plain", "sensitive", "secret", "secret"]);
+    expect(effectiveVisibility({ secret: false })).toBe("plain");
+    expect(effectiveVisibility({})).toBeUndefined();
+  });
+
+  test("an unknown visibility or one that disagrees with `secret` is ENV004 material", () => {
+    const { issues } = parseConfigSource('export default { variables: { A: { visibility: "public" }, B: { secret: false, visibility: "secret" } } };');
+    expect(issues.map(({ variableName, message }) => `${variableName}: ${message}`)).toEqual([
+      "A: `visibility` for A must be one of: plain, sensitive, secret.",
+      'B: B sets both `secret: false` and `visibility: "secret"`, which disagree.',
+    ]);
   });
 });

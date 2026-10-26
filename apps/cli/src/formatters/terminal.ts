@@ -13,6 +13,9 @@ export function formatTerminal(result: ScanResult, counts: SeverityCounts, stric
     const location = formatLocation(diagnostic);
     lines.push(`${diagnostic.code} ${diagnostic.severity}${location ? ` ${location}` : ""} - ${diagnostic.message}`);
     if (diagnostic.suggestion) lines.push(`  Suggestion: ${diagnostic.suggestion}`);
+    // Present only with --show-values, redacted unless the value is a malformed, non-private one (ADR-016).
+    // Sanitized with the rest of the line, so newlines in a value are escaped.
+    if (diagnostic.value !== undefined) lines.push(`  Value: ${diagnostic.value}`);
   }
 
   if (result.skipped.length > 0) {
@@ -29,6 +32,9 @@ export function formatTerminal(result: ScanResult, counts: SeverityCounts, stric
     lines.push(
       `Found ${plural(counts.errors, "error")}, ${plural(counts.warnings, "warning")} and ${counts.infos} info in ${files}.`,
     );
+  }
+  if (result.envFiles.length > 0) {
+    lines.push(`Env files read: ${result.envFiles.join(", ")}. Environment: ${result.envContext}.`);
   }
   if (!result.complete) {
     // A clean result must not look complete when some paths were never read.

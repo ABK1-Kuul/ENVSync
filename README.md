@@ -4,7 +4,7 @@
 
 EnvSync is a local-first CLI for Next.js + TypeScript projects. It compares the environment
 variables your source code reads with an explicit contract (`envsync.config.ts`) and your
-`.env.example`, and reports precise, actionable diagnostics, without ever reading or printing
+`.env.example`, and reports precise, actionable diagnostics, without printing
 secret values.
 
 > Status: pre-release (`0.0.0`), not yet published to npm.
@@ -29,7 +29,10 @@ Found 4 errors, 1 warning and 2 info in 3 files.
 
 - **`envsync scan`** finds undeclared references, required variables missing from
   `.env.example`, possibly unused declarations, invalid config, client-side exposure of secrets,
-  dynamic access that cannot be analyzed, and duplicates. Terminal or JSON output, `--strict` for CI.
+  dynamic access that cannot be analyzed, and duplicates. It also reads every runtime `.env*` file
+  in the project (`.env`, `.env.local`, `.env.production`, ... at any depth) and reports required
+  variables with no value, variables set but not declared, values of the wrong type, and public
+  variables holding something that looks like a secret. Terminal or JSON output, `--strict` for CI.
 - **`envsync init`** previews a starter `envsync.config.ts` and `.env.example` placeholders, and
   writes only with `--write`. It never overwrites a file.
 - **`envsync doctor`** checks your local setup, including whether `.env*.local` files are ignored
@@ -39,8 +42,11 @@ Full reference: [docs/CLI.md](docs/CLI.md). CI setup: [docs/CI.md](docs/CI.md).
 
 ## Privacy and safety guarantees
 
-- No values: EnvSync never prints, stores or copies environment-variable values, and never reads
-  `.env`/`.env.*` files (except `.env.example`, whose values it discards).
+- Values stay local and quiet: `scan` reads your runtime `.env*` files to check their values, but
+  never stores or copies them. A value is printed only when you pass `--show-values`, only for a
+  malformed, non-secret variable, and never in CI; credentials and secret values are always
+  redacted. Use `--no-env-files` to keep `scan` from opening env files at all. `init` and
+  `doctor` never open them, and `.env.example` values are always discarded.
 - No code execution: source files, `next.config.*` and `envsync.config.ts` are parsed, never
   imported or run. No package scripts are run, and `git` is not invoked.
 - No network: scanning is entirely local.

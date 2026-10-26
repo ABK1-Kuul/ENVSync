@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseConfigSource, parseEnvExample, type ParsedConfig, type ParsedEnvExample } from "@envsync-internal/schema";
 import { analyze } from "./analyze.js";
 import type { Diagnostic } from "./diagnostics.js";
+import type { EnvContext } from "./env-context.js";
 import type { FrameworkAdapter } from "./framework.js";
 import {
   collectSourceEvidence,
@@ -15,6 +16,10 @@ import {
 export type ScanResult = {
   diagnostics: Diagnostic[];
   filesScanned: number;
+  /** Root-relative runtime env files that were read (empty when `readEnvFiles` is false). */
+  envFiles: string[];
+  /** The context whose files decided ENV008 (ADR-017). */
+  envContext: EnvContext;
   skipped: SkippedPath[];
   /** False when any path was not scanned (see `skipped`); findings may then be incomplete. */
   complete: boolean;
@@ -23,15 +28,31 @@ export type ScanResult = {
 export type ScanOptions = {
   root: string;
   framework: FrameworkAdapter;
+  /** Read runtime `.env*` files anywhere in the project and check their values. Default: true. */
+  readEnvFiles?: boolean;
+  /**
+   * Attach `Diagnostic.value` to value findings, redacted per ADR-016 (only malformed, non-private
+   * values are shown as-is). Default: false, so values are used but never returned.
+   */
+  includeValues?: boolean;
+  /** Environment context for ENV008 (ADR-017). Default: "development". */
+  envContext?: EnvContext;
 };
 
 /**
- * Runs the full scan pipeline. Reads only: the config file, `.env.example`, and discovered source
- * files. Never reads `.env`/`.env.*`, never executes project code, never touches the network.
+ * Runs the full scan pipeline. Reads: the config file, `.env.example`, discovered source files and,
+ * unless `readEnvFiles` is false, runtime env files with their values. Values are checked in memory
+ * and only returned when `includeValues` is set. Never executes project code, never touches the network.
  */
-export async function scanProject({ root, framework }: ScanOptions): Promise<ScanResult> {
+export async function scanProject({
+  root,
+  framework,
+  readEnvFiles = true,
+  includeValues = false,
+  envContext = "development",
+}: ScanOptions): Promise<ScanResult> {
   const absoluteRoot = path.resolve(root);
-  const evidence = await collectSourceEvidence(absoluteRoot, framework);
+  const evidence = await collectSourceEvidence(absoluteRoot, framework, undefined, { readEnvFiles });
 
   const configText = await readProjectFile(absoluteRoot, CONFIG_FILE_NAME);
   if (configText === null) {
@@ -52,10 +73,20 @@ export async function scanProject({ root, framework }: ScanOptions): Promise<Sca
     envExample,
     references: evidence.references,
     exposures: evidence.exposures,
+    envFiles: evidence.envFiles,
+    envContext,
+    includeValues,
     framework,
   });
 
-  return { diagnostics, filesScanned: evidence.filesScanned, skipped: evidence.skipped, complete: evidence.skipped.length === 0 };
+  return {
+    diagnostics,
+    filesScanned: evidence.filesScanned,
+    envFiles: evidence.envFiles.map(({ file }) => file),
+    envContext,
+    skipped: evidence.skipped,
+    complete: evidence.skipped.length === 0,
+  };
 }
 
 /** Parses the config as data; a parser crash becomes an ENV004 issue, never a fallback to evaluation. */

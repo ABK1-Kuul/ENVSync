@@ -1,9 +1,11 @@
-export { parseConfigSource } from "./config-schema.js";
+export { effectiveVisibility, parseConfigSource } from "./config-schema.js";
 export type { ConfigIssue, ParsedConfig, SourceLocation, VariableDefinition } from "./config-schema.js";
 export { parseEnvExample } from "./env-example.js";
+export { parseEnvFile } from "./env-file.js";
+export type { EnvFileDuplicate, EnvFileEntry, ParsedEnvFile } from "./env-file.js";
 export { renderConfig, renderEnvExample, renderEnvExampleAppend } from "./generate.js";
 export { isUnsafeCodePoint } from "./text-safety.js";
 export type { GeneratedVariable } from "./generate.js";
 export type { EnvExampleDuplicate, EnvExampleEntry, ParsedEnvExample } from "./env-example.js";
-export { isValidVariableName, isVariableType, VARIABLE_TYPES } from "./validation.js";
-export type { VariableType } from "./validation.js";
+export { isValidVariableName, isVariableType, isVisibility, VARIABLE_TYPES, VISIBILITIES } from "./validation.js";
+export type { VariableType, Visibility } from "./validation.js";

@@ -57,15 +57,41 @@ describe("analyze", () => {
     expect(analyze(input({ references: [{ file: "a.ts", references: [ref("NODE_ENV")] }] }))).toEqual([]);
   });
 
+  test("ENV011: a .env.example entry not declared in the config; declared and framework variables are exempt", () => {
+    const result = analyze(
+      input({
+        variables: [variable("API_URL")],
+        references: [{ file: "a.ts", references: [ref("API_URL")] }],
+        example: "API_URL=\nLEGACY_FLAG=\nNODE_ENV=\nPORT=\n",
+      }),
+    );
+    expect(result).toEqual([
+      expect.objectContaining({ code: "ENV011", severity: "warning", file: ".env.example", line: 2, variableName: "LEGACY_FLAG" }),
+    ]);
+    expect(result[0]?.message).toBe("LEGACY_FLAG is listed in .env.example but not declared in envsync.config.ts.");
+    expect(result[0]?.suggestion).toContain("external: true");
+  });
+
+  test("ENV011 reports unconventional, unknown names by line only (an example file can hold a pasted value)", () => {
+    const result = analyze(input({ example: "Xy9QzT2aBc=\nlower_name=\n" }));
+    expect(result.map((d) => `${d.code}:${d.line}:${d.variableName ?? "(hidden)"}`)).toEqual(["ENV011:1:(hidden)", "ENV011:2:(hidden)"]);
+    expect(JSON.stringify(result)).not.toMatch(/Xy9QzT2aBc|lower_name/);
+    // A name the source code reads is already known, so it is shown.
+    const referenced = analyze(input({ example: "lower_name=\n", references: [{ file: "a.ts", references: [ref("lower_name")] }] }));
+    expect(referenced.find((d) => d.code === "ENV011")?.variableName).toBe("lower_name");
+  });
+
   test("ENV002: required variable missing from .env.example, or no .env.example at all", () => {
     const declared = [variable("API_URL", {}, 3), variable("OPTIONAL", { required: false }, 4)];
     const references = [{ file: "a.ts", references: [ref("API_URL"), ref("OPTIONAL")] }];
 
-    const missingEntry = analyze(input({ variables: declared, references, example: "OTHER=\n" }));
+    const missingEntry = analyze(input({ variables: declared, references, example: "OTHER_NAME=\n" }));
     expect(missingEntry).toEqual([
+      // OTHER_NAME itself is undeclared (ENV011); sorted by file, so .env.example comes first.
+      expect.objectContaining({ code: "ENV011", severity: "warning", file: ".env.example", line: 1, variableName: "OTHER_NAME" }),
       expect.objectContaining({ code: "ENV002", severity: "error", file: "envsync.config.ts", line: 3, variableName: "API_URL" }),
     ]);
-    expect(missingEntry[0]?.message).toContain("absent from .env.example");
+    expect(missingEntry[1]?.message).toContain("absent from .env.example");
 
     const noFile = analyze(input({ variables: declared, references, example: null }));
     expect(codes(noFile)).toEqual(["ENV002:error:API_URL"]);

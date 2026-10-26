@@ -2,13 +2,15 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
- * Source discovery for the scan pipeline: the first step, before any file is read.
+ * Source discovery for the scan pipeline (steps 1–2 in ARCHITECTURE.md).
  *
  * Security properties:
  * - Only directory listings and the root's metadata are read; file contents are never opened.
  * - Symbolic links (and Windows junctions) are never followed, so nothing outside the root is visited.
- * - Environment files (`.env`, `.env.*`) are never returned, including `.env.example`,
- *   which is handled by its own parser rather than the source scanner.
+ * - Runtime environment files (`.env`, `.env.local`, `.env.production`, ...) at any depth are
+ *   listed separately in `envFiles`, for the env-file reader. They are never source files.
+ *   Documentation and tooling files (`.env.example`, `.env.sample`, `.env.template`, `.env.vault`,
+ *   `.env.keys`) are not listed: `.env.example` has its own parser, and the others hold no runtime values.
  */
 
 export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"] as const;
@@ -51,6 +53,8 @@ export type SkippedEntry = {
 export type DiscoveryResult = {
   /** Root-relative source file paths using `/` separators, sorted by code unit. */
   files: string[];
+  /** Root-relative runtime env file paths (see `isRuntimeEnvFile`), sorted by code unit. */
+  envFiles: string[];
   /** Entries that were deliberately not traversed, sorted by path. */
   skipped: SkippedEntry[];
 };
@@ -64,6 +68,7 @@ export async function discoverSourceFiles(root: string, maxEntries = MAX_DISCOVE
   await assertDirectory(absoluteRoot);
 
   const files: string[] = [];
+  const envFiles: string[] = [];
   const skipped: SkippedEntry[] = [];
   const pending: string[] = [absoluteRoot];
   let visited = 0;
@@ -89,19 +94,22 @@ export async function discoverSourceFiles(root: string, maxEntries = MAX_DISCOVE
         break traversal;
       }
       if (entry.isSymbolicLink()) {
-        // Only links that could have been scanned make the scan incomplete; a linked
-        // node_modules, image or .env file would never have been read anyway.
+        // Only links that could have been read make the scan incomplete; a linked
+        // node_modules, image or .env.example would never have been read anyway.
         if (couldBeScanned(entry.name, directory, absoluteRoot)) skipped.push({ path: toRelative(absoluteRoot, entryPath), reason: "symlink" });
       } else if (entry.isDirectory()) {
         if (!isExcludedDirectory(entry.name, directory, absoluteRoot)) pending.push(entryPath);
       } else if (entry.isFile() && isSourceFile(entry.name)) {
         files.push(toRelative(absoluteRoot, entryPath));
+      } else if (entry.isFile() && isRuntimeEnvFile(entry.name)) {
+        envFiles.push(toRelative(absoluteRoot, entryPath));
       }
     }
   }
 
   return {
     files: files.sort(compareCodeUnits),
+    envFiles: envFiles.sort(compareCodeUnits),
     skipped: skipped.sort((a, b) => compareCodeUnits(a.path, b.path)),
   };
 }
@@ -142,13 +150,13 @@ function isInsideRouteDirectory(directory: string, absoluteRoot: string): boolea
 
 /**
  * Without following a link its target type is unknown, so a link is assumed relevant unless its
- * name is clearly not scanned: an env file, an excluded directory, a type declaration, or a
+ * name is clearly not read: a non-runtime env file, an excluded directory, a type declaration, or a
  * known non-source extension. Directory names often contain dots (`api.v2`, `[...slug]`), so
  * "has an extension" alone is not enough to treat a link as an ignorable file.
  */
 function couldBeScanned(name: string, parent: string, absoluteRoot: string): boolean {
   const lower = name.toLowerCase();
-  if (isEnvFile(lower)) return false;
+  if (isEnvFile(lower)) return isRuntimeEnvFile(name);
   if (isSourceFile(name)) return true;
   if (isExcludedDirectory(name, parent, absoluteRoot)) return false;
   if (DECLARATION_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return false;
@@ -175,6 +183,14 @@ function isSourceFile(name: string): boolean {
 
 function isEnvFile(lowerName: string): boolean {
   return lowerName === ".env" || lowerName.startsWith(".env.");
+}
+
+const NON_RUNTIME_ENV_SUFFIXES = [".example", ".sample", ".template", ".vault", ".keys"] as const;
+
+/** `.env` or `.env.<anything>` except documentation and tooling files (see the module comment). */
+export function isRuntimeEnvFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  return isEnvFile(lower) && !NON_RUNTIME_ENV_SUFFIXES.some((suffix) => lower.endsWith(suffix));
 }
 
 function toRelative(absoluteRoot: string, absolutePath: string): string {

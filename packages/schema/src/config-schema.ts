@@ -1,8 +1,8 @@
 import ts from "typescript";
-import { isValidVariableName, isVariableType, VARIABLE_TYPES, type VariableType } from "./validation.js";
+import { isValidVariableName, isVariableType, isVisibility, VARIABLE_TYPES, VISIBILITIES, type VariableType, type Visibility } from "./validation.js";
 
 /**
- * Static reader for `envsync.config.ts`.
+ * Static reader for `envsync.config.ts` (ADR-005).
  *
  * The file is parsed into a TypeScript AST and only a constrained literal subset is understood.
  * It is never imported, evaluated or executed. Anything outside the subset becomes a `ConfigIssue`
@@ -17,8 +17,13 @@ export type VariableDefinition = {
   name: string;
   /** Defaults to true. */
   required: boolean;
-  /** `undefined` when the config does not say; consumers must not assume either way. */
+  /**
+   * `undefined` when the config does not say; consumers must not assume either way.
+   * Set from `visibility` when only that is given (`plain` is false, `sensitive` and `secret` are true).
+   */
   secret?: boolean;
+  /** Only when the config sets `visibility`; see `effectiveVisibility` for the combined meaning. */
+  visibility?: Visibility;
   /** True when the variable is read outside the scanned source (framework, dependency, platform). */
   external?: boolean;
   /** Defaults to "string". */
@@ -40,7 +45,7 @@ export type ParsedConfig = {
   issues: ConfigIssue[];
 };
 
-const DEFINITION_FIELDS = ["required", "secret", "external", "type", "description"] as const;
+const DEFINITION_FIELDS = ["required", "secret", "visibility", "external", "type", "description"] as const;
 type DefinitionField = (typeof DEFINITION_FIELDS)[number];
 
 const SUPPORTED_SHAPE =
@@ -249,6 +254,15 @@ function parseDefinition(
         }
         break;
       }
+      case "visibility": {
+        const literal = stringLiteral(fieldValue);
+        if (literal === undefined || !isVisibility(literal)) {
+          invalid(fieldValue, `\`visibility\` for ${name} must be one of: ${VISIBILITIES.join(", ")}.`, "Use one of the supported visibility names as a string literal.");
+        } else {
+          definition.visibility = literal;
+        }
+        break;
+      }
       case "description": {
         const literal = stringLiteral(fieldValue);
         if (literal === undefined) {
@@ -261,7 +275,33 @@ function parseDefinition(
     }
   }
 
+  if (definition.visibility !== undefined) {
+    const impliedSecret = definition.visibility !== "plain";
+    if (definition.secret === undefined) {
+      definition.secret = impliedSecret;
+    } else if (definition.secret !== impliedSecret) {
+      invalid(
+        value,
+        `${name} sets both \`secret: ${definition.secret}\` and \`visibility: "${definition.visibility}"\`, which disagree.`,
+        'Keep only `visibility` (`secret: true` means "secret", `secret: false` means "plain").',
+      );
+      // Until the conflict is fixed, treat the variable as private: either field may be the intended one.
+      definition.secret = true;
+      if (definition.visibility === "plain") definition.visibility = "secret";
+    }
+  }
+
   return definition;
+}
+
+/**
+ * The classification a definition implies: `visibility` if set, otherwise `secret: true` → "secret",
+ * `secret: false` → "plain", neither → `undefined` (unknown; treat conservatively where it matters).
+ */
+export function effectiveVisibility(definition: Pick<VariableDefinition, "secret" | "visibility">): Visibility | undefined {
+  if (definition.visibility !== undefined) return definition.visibility;
+  if (definition.secret === undefined) return undefined;
+  return definition.secret ? "secret" : "plain";
 }
 
 function firstSyntaxError(sourceText: string, fileName: string): { text: string; location?: SourceLocation } | undefined {

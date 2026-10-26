@@ -6,7 +6,7 @@ import type { DiscoveryResult } from "../src/discovery.js";
 import { runDoctor, type FrameworkAdapter } from "../src/index.js";
 
 // Discovery is stubbed so the limit paths can be tested without creating 20,000+ files.
-const discovery = vi.hoisted(() => ({ result: { files: [], skipped: [] } as DiscoveryResult }));
+const discovery = vi.hoisted(() => ({ result: { files: [], envFiles: [], skipped: [] } as DiscoveryResult }));
 
 vi.mock("../src/discovery.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/discovery.js")>();
@@ -36,19 +36,19 @@ const sourceFiles = async () => (await runDoctor({ root, framework, gitSearchCei
 
 describe("doctor source-files and scan limits", () => {
   test("a discovery stop at the entry limit is unknown, not a pass", async () => {
-    discovery.result = { files: ["a.ts"], skipped: [{ path: "z.ts", reason: "limit-reached" }] };
+    discovery.result = { files: ["a.ts"], envFiles: [], skipped: [{ path: "z.ts", reason: "limit-reached" }] };
     expect(await sourceFiles()).toMatchObject({ status: "unknown" });
   });
 
   test("more source files than the scan limit is unknown, not a pass", async () => {
-    discovery.result = { files: Array.from({ length: 20_001 }, (_, i) => `f${i}.ts`), skipped: [] };
+    discovery.result = { files: Array.from({ length: 20_001 }, (_, i) => `f${i}.ts`), envFiles: [], skipped: [] };
     const check = await sourceFiles();
     expect(check).toMatchObject({ status: "unknown" });
     expect(check?.message).toContain("will stop early");
   });
 
   test("exactly at the limit passes", async () => {
-    discovery.result = { files: Array.from({ length: 20_000 }, (_, i) => `f${i}.ts`), skipped: [] };
+    discovery.result = { files: Array.from({ length: 20_000 }, (_, i) => `f${i}.ts`), envFiles: [], skipped: [] };
     expect(await sourceFiles()).toMatchObject({ status: "pass" });
   });
 });

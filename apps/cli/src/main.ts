@@ -4,12 +4,15 @@ import {
   applyInitPlan,
   countBySeverity,
   DiscoveryError,
+  ENV_CONTEXTS,
   InitError,
+  isEnvContext,
   planInit,
   runDoctor,
   scanProject,
   ScanError,
   type DoctorCheck,
+  type EnvContext,
 } from "@envsync-internal/core";
 import { nextFramework } from "@envsync-internal/parser-next";
 import { EXIT_FINDINGS, EXIT_OK, EXIT_USAGE, exitCodeFor } from "./exit-codes.js";
@@ -29,13 +32,15 @@ export type CliIO = {
   cwd: string;
   /** Overridable for tests; defaults to the running Node.js version. */
   nodeVersion?: string;
+  /** Whether output may end up in CI logs. Overridable for tests; defaults to the `CI` environment variable. */
+  ci?: boolean;
 };
 
 const FORMATS = ["terminal", "json"] as const;
 type Format = (typeof FORMATS)[number];
 
 const COMMAND_OPTIONS = {
-  scan: ["format", "strict"],
+  scan: ["format", "strict", "env", "no-env-files", "show-values"],
   init: ["write"],
   doctor: ["format", "strict"],
 } as const;
@@ -44,12 +49,15 @@ type Command = keyof typeof COMMAND_OPTIONS;
 const HELP = `EnvSync - keep environment configuration in sync with your code.
 
 Usage:
-  envsync scan [directory] [--format terminal|json] [--strict]
+  envsync scan [directory] [--format terminal|json] [--strict] [--env <context>]
+               [--no-env-files] [--show-values]
   envsync init [directory] [--write]
   envsync doctor [directory] [--format terminal|json] [--strict]
 
 Commands:
-  scan     Compare process.env references, envsync.config.ts and .env.example.
+  scan     Compare process.env references, envsync.config.ts, .env.example and
+           every runtime .env file in the project (.env, .env.local, .env.production,
+           ... at any depth), including their values.
   init     Preview a starter envsync.config.ts and .env.example placeholders.
            Nothing is written unless you pass --write, which plans again and
            applies that plan. Existing files are never overwritten;
@@ -62,6 +70,12 @@ Options:
   --format   Output format for scan and doctor: terminal (default) or json.
   --strict   scan: warnings and incomplete scans fail.
              doctor: warnings and unknown results fail.
+  --env      scan: environment whose env files decide missing values (ENV008):
+             development (default), preview, production or test.
+  --no-env-files  scan: do not open runtime .env files.
+  --show-values   scan: show the offending value of a malformed, non-secret variable
+                  (ENV010). Credentials and secret values are always redacted.
+                  Ignored when the CI environment variable is set.
   --write    init: apply the planned changes.
   -h, --help     Show this help.
   -v, --version  Show the version.
@@ -75,8 +89,10 @@ Exit codes:
      for scan; for init --write, a file that changed between planning and writing, a
      blocked change, or a failed write).
 
-EnvSync never prints environment-variable values, never reads .env files (doctor
-checks only their names), never executes project code and makes no network requests.
+scan reads runtime .env files and checks their values in memory; it prints no values unless
+--show-values is passed, and never prints credentials or secret values. init and doctor
+never open .env files (doctor checks only their names).
+EnvSync never executes project code and makes no network requests.
 `;
 
 /** Runs the CLI and returns the process exit code. Never throws. */
@@ -91,6 +107,9 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
         format: { type: "string" },
         strict: { type: "boolean" },
         write: { type: "boolean" },
+        env: { type: "string" },
+        "no-env-files": { type: "boolean" },
+        "show-values": { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -113,7 +132,7 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
   if (rest.length > 1) return usageError(io, `\`${command}\` accepts at most one directory.`);
 
   const allowed: readonly string[] = COMMAND_OPTIONS[command];
-  for (const option of ["format", "strict", "write"] as const) {
+  for (const option of ["format", "strict", "write", "env", "no-env-files", "show-values"] as const) {
     if (values[option] !== undefined && !allowed.includes(option)) {
       return usageError(io, `\`--${option}\` is not an option of \`${command}\`.`);
     }
@@ -121,12 +140,25 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
 
   const format = values.format ?? "terminal";
   if (!isFormat(format)) return usageError(io, `Unknown format \`${format}\`. Use one of: ${FORMATS.join(", ")}.`);
+  const envContext = values.env ?? "development";
+  if (!isEnvContext(envContext)) return usageError(io, `Unknown environment \`${envContext}\`. Use one of: ${ENV_CONTEXTS.join(", ")}.`);
   const root = path.resolve(io.cwd, rest[0] ?? ".");
 
   try {
     switch (command) {
-      case "scan":
-        return await runScan(io, root, format, values.strict ?? false);
+      case "scan": {
+        let includeValues = values["show-values"] ?? false;
+        if (includeValues && (io.ci ?? isCiEnvironment())) {
+          // CI logs are long-lived and widely readable (ADR-016).
+          io.stderr("envsync: --show-values is ignored because this looks like a CI environment; values are not printed in CI.\n");
+          includeValues = false;
+        }
+        return await runScan(io, root, format, values.strict ?? false, {
+          readEnvFiles: !(values["no-env-files"] ?? false),
+          includeValues,
+          envContext,
+        });
+      }
       case "init":
         return await runInit(io, root, values.write ?? false);
       case "doctor":
@@ -142,8 +174,14 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
   }
 }
 
-async function runScan(io: CliIO, root: string, format: Format, strict: boolean): Promise<number> {
-  const result = await scanProject({ root, framework: nextFramework });
+async function runScan(
+  io: CliIO,
+  root: string,
+  format: Format,
+  strict: boolean,
+  envOptions: { readEnvFiles: boolean; includeValues: boolean; envContext: EnvContext },
+): Promise<number> {
+  const result = await scanProject({ root, framework: nextFramework, ...envOptions });
   const counts = countBySeverity(result.diagnostics);
   const exitCode = exitCodeFor(counts, strict, result.complete);
   io.stdout(format === "json" ? formatJson(result, counts, strict, exitCode) : formatTerminal(result, counts, strict, exitCode));
@@ -199,6 +237,16 @@ function printError(io: CliIO, message: string): void {
 
 function isCommand(value: string): value is Command {
   return Object.hasOwn(COMMAND_OPTIONS, value);
+}
+
+// Providers that do not always set CI. Their presence alone means output may end up in a build log.
+const CI_PROVIDER_VARIABLES = ["GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "TF_BUILD", "JENKINS_URL", "CODEBUILD_BUILD_ID", "TEAMCITY_VERSION", "CIRCLECI", "BITBUCKET_BUILD_NUMBER"];
+
+/** `CI` set to anything but an empty string, "0" or "false", or a known CI provider's variable. */
+function isCiEnvironment(): boolean {
+  const value = process.env.CI;
+  if (value !== undefined && value !== "" && value !== "0" && value.toLowerCase() !== "false") return true;
+  return CI_PROVIDER_VARIABLES.some((name) => (process.env[name] ?? "") !== "");
 }
 
 function isFormat(value: string): value is Format {
