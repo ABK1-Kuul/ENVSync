@@ -21,7 +21,9 @@ output shape are public contracts (ADR-003); changes to them are called out expl
   context (preview: `.env.preview*` over `.env.production`); `info` when a deployed context has no
   file of its own.
 - `visibility: "plain" | "sensitive" | "secret"` config field (`secret` remains as shorthand).
-- UTF-16 env files are reported as not scanned (`unsupported-encoding`).
+- UTF-16 env files are reported as not scanned (`unsupported-encoding`); a stray NUL byte in a
+  UTF-8 env file does not count. Config error messages quote an invalid key only if it is short and
+  name-like.
 - Env files accept dotenv's `KEY: value` form; root env file names match case-insensitively.
 - ENV011 (warning): a `.env.example` entry that is not declared in the config.
 - ENV008 (required variable has no value in the selected context's env files), ENV009 (set in an env file but not
