@@ -18,7 +18,8 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Agent instructions, design specs and planning
+# Agent instructions, design specs and planning: kept local, never committed
+# (product-owner decision: they describe how the system works internally).
 .claude/
 AGENTS.md
 ARCHITECTURE.md
@@ -27,7 +28,9 @@ DESIGN.md
 PRODUCT.md
 PROMPTS.md
 ROADMAP.md
+IMPLEMENTATION_STATUS.md
 docs/CLAUDE-KIT.md
 docs/DECISIONS.md
 docs/DEFINITION-OF-DONE.md
-
+docs/PHASE-0-BASELINE.md
+docs/THREAT-MODEL.md
