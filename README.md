@@ -37,6 +37,8 @@ Found 4 errors, 1 warning and 2 info in 3 files.
   writes only with `--write`. It never overwrites a file.
 - **`envsync doctor`** checks your local setup, including whether `.env*.local` files are ignored
   by git, without reading their contents.
+- **VS Code extension** (pre-release, in [apps/vscode](apps/vscode/README.md)): edit env files as a
+  table with previewed, format-preserving edits; see diagnostics in the Problems panel.
 
 Full reference: [docs/CLI.md](docs/CLI.md). CI setup: [docs/CI.md](docs/CI.md).
 
@@ -88,7 +90,9 @@ node apps/cli/dist/bin.js scan path/to/next-app
 | `packages/schema` | Static config parser, `.env.example` parser, safe text generation |
 | `packages/parser-next` | AST extraction of `process.env` references, `next.config` `env` keys |
 | `packages/core` | Discovery, analysis, diagnostics, scan / init / doctor orchestration |
+| `packages/env-edit` | Format-preserving edits to env files (set, add, rename, remove) |
 | `apps/cli` | Argument parsing, formatters, exit codes |
+| `apps/vscode` | VS Code extension: table editor, diagnostics, environment selector |
 | `tests` | Fixture projects, integration and security tests |
 
 Contributor guidance: [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md).

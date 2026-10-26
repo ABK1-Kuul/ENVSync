@@ -207,7 +207,35 @@ importers:
         specifier: 0.28.2
         version: 0.28.2
 
+  apps/vscode:
+    dependencies:
+      '@envsync-internal/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@envsync-internal/env-edit':
+        specifier: workspace:*
+        version: link:../../packages/env-edit
+      '@envsync-internal/parser-next':
+        specifier: workspace:*
+        version: link:../../packages/parser-next
+      '@envsync-internal/schema':
+        specifier: workspace:*
+        version: link:../../packages/schema
+    devDependencies:
+      '@types/vscode':
+        specifier: 1.95.0
+        version: 1.95.0
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
   packages/core:
+    dependencies:
+      '@envsync-internal/schema':
+        specifier: workspace:*
+        version: link:../schema
+
+  packages/env-edit:
     dependencies:
       '@envsync-internal/schema':
         specifier: workspace:*
@@ -567,6 +595,9 @@ packages:
 
   '@types/node@22.20.5':
     resolution: {integrity: sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==}
+
+  '@types/vscode@1.95.0':
+    resolution: {integrity: sha512-0LBD8TEiNbet3NvWsmn59zLzOFu/txSlGxnv5yAFHCrhG9WvAnR3IvfHzMOs2aeWqgvNjq9pO99IUw8d3n+unw==}
 
   '@typescript-eslint/eslint-plugin@8.71.1':
     resolution: {integrity: sha512-nNlBf6HuotqMgZvSkWD5hNdemiBIxQ2NmrlgfcUIeZRs+BbakjscCQRq/Hb74EFVnFiSWWdL12JruqwBy3ERDw==}
@@ -1426,6 +1457,8 @@ snapshots:
   '@types/node@22.20.5':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/vscode@1.95.0': {}
 
   '@typescript-eslint/eslint-plugin@8.71.1(@typescript-eslint/parser@8.71.1(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@6.0.3))(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@6.0.3)':
     dependencies:

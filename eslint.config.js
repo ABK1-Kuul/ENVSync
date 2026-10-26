@@ -24,9 +24,17 @@ export default defineConfig(
   },
   {
     files: ["**/*.js", "**/*.mjs"],
-    ignores: ["site/**"],
+    ignores: ["site/**", "apps/vscode/media/**"],
     languageOptions: {
       globals: { process: "readonly", console: "readonly", URL: "readonly", Buffer: "readonly" },
+    },
+  },
+  {
+    // The extension's table webview runs in a sandboxed browser frame.
+    files: ["apps/vscode/media/**/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: { window: "readonly", document: "readonly", acquireVsCodeApi: "readonly" },
     },
   },
   {

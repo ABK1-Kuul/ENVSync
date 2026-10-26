@@ -17,6 +17,11 @@ output shape are public contracts (ADR-003); changes to them are called out expl
 - A symlinked runtime env file now makes the scan incomplete (it is not followed).
 
 ### Added
+- VS Code extension (`apps/vscode`, pre-release): a table editor for env files with previewed,
+  format-preserving edits and conflict detection; masked secret values with explicit reveal;
+  EnvSync diagnostics in the Problems panel; an environment selector. Local only, no telemetry.
+- `@envsync-internal/env-edit`: format-preserving set/add/rename/remove for env files, verified by
+  re-parsing every result.
 - `scan --env development|preview|production|test`: ENV008 uses the files Next.js loads for that
   context (preview: `.env.preview*` over `.env.production`); `info` when a deployed context has no
   file of its own.
