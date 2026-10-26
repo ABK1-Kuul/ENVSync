@@ -26,6 +26,23 @@ export function applyEnvEdit(original: string, edit: EnvEdit): EnvEditResult {
   const { assignments } = parseEnvAssignments(original);
   const named = (name: string) => assignments.filter((assignment) => assignment.name === name);
 
+  // Next.js expands `$NAME` / `${NAME}`, and whether quoting prevents it depends on its version, so
+  // a written value containing `$` might not read back as typed. Edit those as text.
+  if ((edit.kind === "set" || edit.kind === "add") && edit.value.includes("$")) {
+    return refuse("Values containing `$` can be read as references to other variables; edit this one as text.");
+  }
+  const touched = edit.kind === "rename" ? edit.from : edit.kind === "add" ? undefined : edit.name;
+  if (touched !== undefined) {
+    // An unquoted key block spans lines by EnvSync's reading only; dotenv reads just its first line.
+    if (named(touched).some((assignment) => assignment.quote === undefined && assignment.endLine > assignment.line)) {
+      return refuse(`${describe(touched)} spans an unquoted multi-line block; edit it as text.`);
+    }
+    // Renaming or removing a variable that others reference would silently change their values.
+    if (edit.kind !== "set" && isReferenced(touched, assignments)) {
+      return refuse(`${describe(touched)} is referenced by another variable (as $${describe(touched)}); edit as text.`);
+    }
+  }
+
   let edited: Document;
   switch (edit.kind) {
     case "set": {
@@ -106,9 +123,37 @@ function rewriteValue(document: Document, target: EnvAssignment, value: string):
   const match = ASSIGNMENT_PREFIX.exec(first);
   if (match === null || match[2] !== target.name) return refuse("This line cannot be edited safely; edit the raw text instead.");
   const prefix = match[0];
-  // Keep an inline comment when the old value fits on one line.
-  const suffix = target.line === target.endLine ? inlineComment(first.slice(prefix.length)) : "";
+  // Keep the inline comment: on the same line for a one-line value, or after the closing quote of a
+  // multi-line one.
+  const suffix =
+    target.line === target.endLine
+      ? inlineComment(first.slice(prefix.length))
+      : closingLineComment(document.lines[target.endLine - 1] as string, target.quote);
   return `${prefix}${serialized}${suffix}`;
+}
+
+/** The ` # comment` after the closing quote on the last line of a multi-line quoted value, or "". */
+function closingLineComment(lastLine: string, quote: string | undefined): string {
+  if (quote === undefined) return "";
+  for (let i = 0; i < lastLine.length; i++) {
+    if (quote === '"' && lastLine[i] === "\\" && lastLine[i + 1] === quote) i++;
+    else if (lastLine[i] === quote) {
+      const after = lastLine.slice(i + 1);
+      return /^\s*#/.test(after) ? after : "";
+    }
+  }
+  return "";
+}
+
+/** Whether any other assignment's value refers to `name` as `$NAME` or `${NAME}`. */
+function isReferenced(name: string, assignments: readonly EnvAssignment[]): boolean {
+  const reference = new RegExp(`\\$(?:\\{${escapeRegExp(name)}[}:\\-+?]|${escapeRegExp(name)}(?![\\w]))`);
+  return assignments.some((assignment) => assignment.name !== name && reference.test(assignment.value));
+}
+
+function escapeRegExp(text: string): string {
+  // `$&` deliberately inserts the matched character after a backslash.
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** The trailing ` # comment` after a single-line value (with the blanks before it), or "". */

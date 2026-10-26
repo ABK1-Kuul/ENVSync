@@ -39,7 +39,7 @@ describe("set", () => {
   });
 
   test("quotes values as needed so they read back exactly", () => {
-    const cases = ["plain", "", "has space", "a#b", "$HOME/x", "it's", "line1\nline2", " padded ", "-----BEGIN PRIVATE KEY-----", "`tick`", 'say "hi"'];
+    const cases = ["plain", "", "has space", "a#b", "it's", "line1\nline2", " padded ", "-----BEGIN PRIVATE KEY-----", "`tick`", 'say "hi"'];
     for (const next of cases) {
       const after = edited("V=old\n", { kind: "set", name: "V", value: next });
       expect(value(after, "V")).toBe(next);
@@ -47,7 +47,7 @@ describe("set", () => {
   });
 
   test("refuses a value that cannot be written exactly, without echoing it", () => {
-    const impossible = "it's \"both\"\nand `more` $X";
+    const impossible = "it's \"both\"\nand `more`";
     const result = applyEnvEdit("V=old\n", { kind: "set", name: "V", value: impossible });
     expect(result).toEqual({ ok: false, reason: expect.stringContaining("edit the raw text instead") });
     expect(JSON.stringify(result)).not.toContain("both");
@@ -94,6 +94,50 @@ describe("remove", () => {
     expect(edited("A=1\nB=2", { kind: "remove", name: "B" })).toBe("A=1");
     expect(edited("A=1", { kind: "remove", name: "A" })).toBe("");
     expect(edited("A=1\r\nB=2\r\n", { kind: "remove", name: "A" })).toBe("B=2\r\n");
+  });
+});
+
+describe("review round 3: edits that could change what Next.js reads are refused", () => {
+  test("values containing `$` are refused (Next.js may expand them, even quoted)", () => {
+    for (const edit of [
+      { kind: "set", name: "A", value: "$HOME/x" },
+      { kind: "add", name: "B", value: "pa$$word" },
+    ] as const) {
+      expect(applyEnvEdit("A=1\n", edit)).toEqual({ ok: false, reason: expect.stringContaining("references to other variables") });
+    }
+  });
+
+  test("renaming or removing a variable another value references ($NAME or ${NAME}) is refused", () => {
+    const text = "HOST=db\nURL=postgres://${HOST}/app\nPORT_NUM=5432\nDSN=x:$PORT_NUM\nHOSTNAME_X=1\n";
+    expect(applyEnvEdit(text, { kind: "rename", from: "HOST", to: "DB_HOST" })).toMatchObject({ ok: false, reason: expect.stringContaining("referenced") });
+    expect(applyEnvEdit(text, { kind: "remove", name: "PORT_NUM" })).toMatchObject({ ok: false, reason: expect.stringContaining("referenced") });
+    // A longer name that merely starts with a referenced one is not a reference to it.
+    expect(applyEnvEdit("A=1\nB=$AB\n", { kind: "remove", name: "A" })).toMatchObject({ ok: true });
+    // Changing the value of a referenced variable is allowed: that is the point of referencing it.
+    expect(applyEnvEdit(text, { kind: "set", name: "HOST", value: "db2" })).toMatchObject({ ok: true });
+  });
+
+  test("an unquoted multi-line key block is never rewritten from the table", () => {
+    const text = "KEY=-----BEGIN PRIVATE KEY-----\nQUJDREVG\n-----END PRIVATE KEY-----\nNEXT=1\n";
+    for (const edit of [
+      { kind: "remove", name: "KEY" },
+      { kind: "set", name: "KEY", value: "x" },
+      { kind: "rename", from: "KEY", to: "OTHER" },
+    ] as const) {
+      expect(applyEnvEdit(text, edit)).toMatchObject({ ok: false, reason: expect.stringContaining("multi-line block") });
+    }
+  });
+
+  test("a key block without an END line does not hide the assignments after it", () => {
+    const text = "KEY=-----BEGIN PRIVATE KEY-----\nQUJD\nDATABASE_URL=postgres://db/app\n";
+    expect(parseEnvFile(text).entries.map((entry) => entry.name)).toEqual(["KEY", "DATABASE_URL"]);
+    // Removing the key now touches only the lines that are key material, never DATABASE_URL.
+    expect(applyEnvEdit(text, { kind: "remove", name: "KEY" })).toMatchObject({ ok: false });
+    expect(edited(text, { kind: "set", name: "DATABASE_URL", value: "postgres://db/other" })).toContain("DATABASE_URL=postgres://db/other\n");
+  });
+
+  test("the comment after a multi-line value's closing quote is kept", () => {
+    expect(edited('KEY="a\nb" # keep me\nNEXT=1\n', { kind: "set", name: "KEY", value: "one" })).toBe("KEY=one # keep me\nNEXT=1\n");
   });
 });
 

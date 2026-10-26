@@ -1,5 +1,5 @@
 import path from "node:path";
-import { CONFIG_FILE_NAME, ENV_CONTEXTS, isEnvContext, scanProject, type EnvContext } from "@envsync-internal/core";
+import { CONFIG_FILE_NAME, DiscoveryError, ENV_CONTEXTS, isEnvContext, ScanError, scanProject, type EnvContext } from "@envsync-internal/core";
 import { nextFramework } from "@envsync-internal/parser-next";
 import * as vscode from "vscode";
 import { groupFindings } from "./diagnostics.js";
@@ -97,8 +97,10 @@ async function scanWorkspace(collection: vscode.DiagnosticCollection, environmen
         );
       }
     } catch (error) {
-      // Scan errors (missing config, unreadable file) are messages written for users; never values.
-      void vscode.window.showWarningMessage(`EnvSync: ${error instanceof Error ? error.message : "the scan could not run."}`);
+      // Only EnvSync's own errors are shown as written (they are user-facing and never contain values);
+      // anything else could quote file content, so it gets a generic message.
+      const known = error instanceof ScanError || error instanceof DiscoveryError;
+      void vscode.window.showWarningMessage(`EnvSync: ${known ? error.message : "the scan could not run. Run `envsync scan` in a terminal for details."}`);
     }
   }
 }

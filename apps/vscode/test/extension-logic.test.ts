@@ -56,9 +56,11 @@ describe("table model", () => {
     expect(serialized).not.toContain("a1a1a1");
   });
 
-  test("without a config, nothing is flagged as undeclared and the model says so", () => {
-    const bare = buildTableModel({ text: "A_VAR=1\n", version: 1, fileName: ".env", environment: "production", config: null, publicPrefix: "NEXT_PUBLIC_" });
-    expect(bare).toMatchObject({ hasConfig: false, rows: [{ name: "A_VAR", value: "1", issues: [] }] });
+  test("without a config, nothing is flagged as undeclared, and every value is masked (nothing says which are secret)", () => {
+    const bare = buildTableModel({ text: `A_VAR=${FAKE_SECRET}\n`, version: 1, fileName: ".env", environment: "production", config: null, publicPrefix: "NEXT_PUBLIC_" });
+    expect(bare).toMatchObject({ hasConfig: false, rows: [{ name: "A_VAR", masked: true, issues: [] }] });
+    expect(bare.rows[0]?.maskReason).toContain("No envsync.config.ts");
+    expect(JSON.stringify(bare)).not.toContain(FAKE_SECRET);
   });
 
   test("revealValue returns the effective value of one name, on request", () => {
@@ -131,5 +133,14 @@ describe("diagnostics for the Problems panel", () => {
         { file: "envsync.config.ts", line: 0, column: 0, severity: "warning", code: "ENV999", message: "Project-level." },
       ],
     });
+  });
+});
+
+describe("how an edit is confirmed", () => {
+  test("files with hidden values confirm by name (a diff would display them); others use the diff preview", async () => {
+    const { confirmationMode } = await import("../src/edit-handler.js");
+    expect(confirmationMode(model)).toBe("dialog");
+    expect(confirmationMode({ rows: [{ masked: false }, { masked: false }] })).toBe("diff");
+    expect(confirmationMode({ rows: [] })).toBe("diff");
   });
 });

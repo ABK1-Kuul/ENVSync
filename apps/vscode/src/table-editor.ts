@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { parseConfigSource, type ParsedConfig } from "@envsync-internal/schema";
 import * as vscode from "vscode";
-import { decideEdit } from "./edit-handler.js";
+import { confirmationMode, decideEdit } from "./edit-handler.js";
 import { parseWebviewMessage } from "./messages.js";
 import { buildTableModel, revealValue } from "./model.js";
 
@@ -24,17 +24,17 @@ export class EnvTableEditorProvider implements vscode.CustomTextEditorProvider {
     panel.webview.options = { enableScripts: true, localResourceRoots: [mediaRoot] };
     panel.webview.html = this.html(panel.webview, mediaRoot);
 
-    const render = async () => {
-      const config = await readConfig(document.uri);
-      const model = buildTableModel({
+    const buildModel = async () =>
+      buildTableModel({
         text: document.getText(),
         version: document.version,
         fileName: vscode.workspace.asRelativePath(document.uri),
         environment: this.environment(),
-        config,
+        config: await readConfig(document.uri),
         publicPrefix: "NEXT_PUBLIC_",
       });
-      await panel.webview.postMessage({ type: "model", model });
+    const render = async () => {
+      await panel.webview.postMessage({ type: "model", model: await buildModel() });
     };
 
     const subscriptions = [
@@ -69,10 +69,31 @@ export class EnvTableEditorProvider implements vscode.CustomTextEditorProvider {
               await panel.webview.postMessage({ type: "notice", text: decision.reason });
               return;
             }
+            if (confirmationMode(await buildModel()) === "dialog") {
+              // The diff preview would show the whole file, hidden values included: confirm by name.
+              const choice = await vscode.window.showWarningMessage(
+                `${decision.label}?`,
+                {
+                  modal: true,
+                  detail: "This file has hidden values, so the change is not shown as a diff (that would display them). Use \"Open as text\" to review the whole file.",
+                },
+                "Apply",
+              );
+              if (choice !== "Apply") return;
+              // The file may have changed while the dialog was open: decide again against it now.
+              const current = decideEdit(document.getText(), document.version, message.version, message.edit);
+              if (current.kind !== "apply") {
+                await panel.webview.postMessage({ type: "notice", text: "The file changed before the change was applied. The table has been refreshed; please make the change again." });
+                return void render();
+              }
+              const edit = new vscode.WorkspaceEdit();
+              edit.replace(document.uri, rangeOf(document, current.replacement), current.replacement.text);
+              if (!(await vscode.workspace.applyEdit(edit))) await panel.webview.postMessage({ type: "notice", text: "The change was not applied." });
+              return;
+            }
             const edit = new vscode.WorkspaceEdit();
-            const range = new vscode.Range(document.positionAt(decision.replacement.start), document.positionAt(decision.replacement.end));
             // needsConfirmation opens VS Code's refactor preview: the change is shown before it is applied.
-            edit.replace(document.uri, range, decision.replacement.text, { label: decision.label, needsConfirmation: true });
+            edit.replace(document.uri, rangeOf(document, decision.replacement), decision.replacement.text, { label: decision.label, needsConfirmation: true });
             const applied = await vscode.workspace.applyEdit(edit);
             if (!applied) await panel.webview.postMessage({ type: "notice", text: "The change was not applied." });
             return;
@@ -111,15 +132,36 @@ export class EnvTableEditorProvider implements vscode.CustomTextEditorProvider {
   }
 }
 
-/** The app's envsync.config.ts next to the env file (Next.js loads env files from the app root). */
+function rangeOf(document: vscode.TextDocument, replacement: { start: number; end: number }): vscode.Range {
+  return new vscode.Range(document.positionAt(replacement.start), document.positionAt(replacement.end));
+}
+
+const MAX_CONFIG_BYTES = 1_000_000;
+
+/**
+ * The nearest envsync.config.ts from the env file's folder up to its workspace folder (Next.js loads
+ * env files from the app root, which is where the config normally sits). Only regular files inside
+ * the workspace are read: links are not followed, and the size is checked before reading.
+ */
 async function readConfig(envFile: vscode.Uri): Promise<ParsedConfig | null> {
-  const configUri = vscode.Uri.joinPath(envFile, "..", "envsync.config.ts");
-  try {
-    const bytes = await vscode.workspace.fs.readFile(configUri);
-    if (bytes.byteLength > 1_000_000) return null;
-    // Parsed as data, never executed (the same parser the CLI uses).
-    return parseConfigSource(new TextDecoder().decode(bytes));
-  } catch {
-    return null;
+  const folder = vscode.workspace.getWorkspaceFolder(envFile);
+  if (folder === undefined) return null;
+  const rootPath = folder.uri.path.replace(/\/$/, "");
+  let directory = vscode.Uri.joinPath(envFile, "..");
+  for (;;) {
+    const configUri = vscode.Uri.joinPath(directory, "envsync.config.ts");
+    try {
+      const stat = await vscode.workspace.fs.stat(configUri);
+      // FileType is a bit set: a link to a file reports File | SymbolicLink.
+      if (stat.type === vscode.FileType.File && stat.size <= MAX_CONFIG_BYTES) {
+        // Parsed as data, never executed (the same parser the CLI uses).
+        return parseConfigSource(new TextDecoder().decode(await vscode.workspace.fs.readFile(configUri)));
+      }
+      return null; // present but a link, a directory or too large: do not use it
+    } catch {
+      // not here; try the parent
+    }
+    if (directory.path.replace(/\/$/, "") === rootPath || !directory.path.startsWith(rootPath)) return null;
+    directory = vscode.Uri.joinPath(directory, "..");
   }
 }

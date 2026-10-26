@@ -127,7 +127,8 @@
     app.append(el("table", {}, [head, body]));
 
     const newName = el("input", { type: "text", placeholder: "NEW_VARIABLE", "aria-label": "New variable name" });
-    const newValue = el("input", { type: "text", placeholder: "value", "aria-label": "New variable value" });
+    // Masked like other values: a new value is often a secret.
+    const newValue = el("input", { type: "password", placeholder: "value", "aria-label": "New variable value", autocomplete: "off" });
     app.append(
       el("form", {
         class: "add",

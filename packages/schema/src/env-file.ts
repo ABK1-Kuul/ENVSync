@@ -110,16 +110,21 @@ export function parseEnvAssignments(text: string): ParsedEnvAssignments {
         quote = wrapped[1] as EnvFileEntry["quote"];
         value = wrapped[2] as string;
       }
-      // An unquoted PEM block pasted across lines: dotenv keeps only the first line, but the
-      // following lines are key material, never assignments. Skip them up to the END line so a
-      // base64 line ending in `=` is not read as a variable name (names are printed by default).
+      // An unquoted PEM block pasted across lines: dotenv keeps only the first line, and the
+      // following base64 lines are key material, not assignments. Skip them (and the END line) so a
+      // base64 line ending in `=` is not read as a variable name. Only lines that look like key
+      // material are skipped: the first other line ends the block and is parsed normally, so a
+      // block without an END line cannot swallow real assignments that dotenv would read.
       if (/^-----BEGIN [A-Z0-9 ]+-----$/.test(value)) {
         let next = lineEnd;
         while (next < body.length) {
           const following = indexOrEnd(body, "\n", next + 1);
+          const content = body.slice(next + 1, following).trim();
+          const isEnd = content.includes("-----END ");
+          if (!isEnd && !/^[A-Za-z0-9+/]+={0,2}$/.test(content)) break;
           line++;
           end = following;
-          if (body.slice(next + 1, following).includes("-----END ")) break;
+          if (isEnd) break;
           next = following;
         }
       }

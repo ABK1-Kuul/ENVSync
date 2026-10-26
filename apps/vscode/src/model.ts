@@ -41,9 +41,12 @@ export type ModelInput = {
   version: number;
   fileName: string;
   environment: string;
+  /** `null` when no envsync.config.ts was found: every value is then masked (nothing says which are secret). */
   config: ParsedConfig | null;
   publicPrefix: string;
 };
+
+const NO_CONFIG_REASON = "No envsync.config.ts was found for this file, so every value is hidden until revealed.";
 
 const PRIVATE_NAME = /SECRET|PASS|PWD|TOKEN|PRIVATE|CREDENTIAL|KEY|AUTH|SALT|DSN|JWT|SIGN|CERT|SESSION|COOKIE/i;
 
@@ -60,7 +63,7 @@ export function buildTableModel(input: ModelInput): TableModel {
     .map((assignment): TableRow => {
       const definition = declared.get(assignment.name);
       const visibility = definition === undefined ? undefined : effectiveVisibility(definition);
-      const mask = maskReason(assignment.name, assignment.value, visibility);
+      const mask = input.config === null ? NO_CONFIG_REASON : maskReason(assignment.name, assignment.value, visibility);
       const issues: RowIssue[] = [];
       if ((counts.get(assignment.name) ?? 0) > 1) issues.push("duplicate");
       if (input.config !== null && definition === undefined) issues.push("undeclared");

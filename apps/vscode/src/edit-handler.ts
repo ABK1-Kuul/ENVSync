@@ -21,6 +21,15 @@ export function decideEdit(documentText: string, documentVersion: number, reques
   return { kind: "apply", replacement: result.replacement, label: describeEdit(edit) };
 }
 
+/**
+ * How an edit is shown before it is applied. VS Code's diff preview displays the whole file, which
+ * would expose every hidden value; files with hidden values get a confirmation that names the
+ * change instead.
+ */
+export function confirmationMode(model: { rows: readonly { masked: boolean }[] }): "diff" | "dialog" {
+  return model.rows.some((row) => row.masked) ? "dialog" : "diff";
+}
+
 // Shown in VS Code's edit preview; names only, never values.
 export function describeEdit(edit: EnvEdit): string {
   switch (edit.kind) {
