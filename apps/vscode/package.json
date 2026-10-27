@@ -1,0 +1,94 @@
+{
+  "name": "envsync-vscode",
+  "displayName": "EnvSync",
+  "description": "Edit .env files as a table, see EnvSync diagnostics, and check them per environment. Local only: no network, no telemetry, never executes project code.",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "publisher": "envsync",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "workspaceContains:**/envsync.config.ts"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "EnvSync only reads files; it never executes code from the workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "envsync.envTable",
+        "displayName": "EnvSync table",
+        "selector": [
+          {
+            "filenamePattern": "**/.env"
+          },
+          {
+            "filenamePattern": "**/.env.*"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "envsync.openTable",
+        "title": "Open as EnvSync table",
+        "category": "EnvSync"
+      },
+      {
+        "command": "envsync.selectEnvironment",
+        "title": "Select environment",
+        "category": "EnvSync"
+      },
+      {
+        "command": "envsync.scanWorkspace",
+        "title": "Scan workspace",
+        "category": "EnvSync"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "envsync.openTable",
+          "when": "resourceFilename =~ /^\\.env(\\..*)?$/",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "envsync.openTable",
+          "when": "resourceFilename =~ /^\\.env(\\..*)?$/ && activeEditor == workbench.editors.files.textFileEditor",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "bundle": "node scripts/bundle.mjs",
+    "test:e2e": "node scripts/bundle.mjs && node scripts/test-e2e.mjs"
+  },
+  "dependencies": {
+    "@envsync-internal/core": "workspace:*",
+    "@envsync-internal/env-edit": "workspace:*",
+    "@envsync-internal/parser-next": "workspace:*",
+    "@envsync-internal/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.95.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.0.0",
+    "esbuild": "0.28.2"
+  }
+}

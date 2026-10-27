@@ -226,6 +226,21 @@ describe("environment contexts and encodings", () => {
     const output = JSON.parse((await runCli(["scan", "--format", "json"], fixture.root)).stdout);
     expect(output).toMatchObject({ envFiles: [], skipped: [{ path: ".env.local", reason: "unsupported-encoding" }], summary: { complete: false }, diagnostics: [] });
   });
+  test("a stray NUL byte in a UTF-8 env file does not hide it from the credential check", async () => {
+    fixture = await copyFixture("next-app-router");
+    const { runCli } = await import("../helpers.js");
+    const stripe = `sk_live_${"a1".repeat(12)}`;
+    await writeFile(path.join(fixture.root, ".env.production"), Buffer.from(`# note\u0000\nNEXT_PUBLIC_PAY=${stripe}\n`, "utf8"));
+    const output = JSON.parse((await runCli(["scan", "--format", "json"], fixture.root)).stdout);
+    expect(output.envFiles).toEqual([".env.production"]);
+    expect(output.skipped).toEqual([]);
+    expect(output.diagnostics.map((d: { code: string; variableName?: string }) => `${d.code}:${d.variableName}`)).toContain("ENV005:NEXT_PUBLIC_PAY");
+
+    // UTF-16 without a byte-order mark is still recognized by its NUL rate.
+    await writeFile(path.join(fixture.root, ".env.production"), Buffer.from("NEXT_PUBLIC_A=1\nNEXT_PUBLIC_B=2\n", "utf16le"));
+    const utf16 = JSON.parse((await runCli(["scan", "--format", "json"], fixture.root)).stdout);
+    expect(utf16.skipped).toEqual([{ path: ".env.production", reason: "unsupported-encoding" }]);
+  });
 });
 
 describe("ENV011: .env.example entries not in the contract", () => {

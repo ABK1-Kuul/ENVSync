@@ -17,11 +17,20 @@ output shape are public contracts (ADR-003); changes to them are called out expl
 - A symlinked runtime env file now makes the scan incomplete (it is not followed).
 
 ### Added
+- VS Code extension (`apps/vscode`, pre-release): a table editor for env files with previewed,
+  format-preserving edits and conflict detection; masked secret values with explicit reveal;
+  EnvSync diagnostics in the Problems panel; an environment selector. Local only, no telemetry.
+- The extension is tested inside a real VS Code (1.95.0, the minimum supported, and the latest stable)
+  and packaged as a `.vsix` with an allow-listed file set; both run in CI.
+- `@envsync-internal/env-edit`: format-preserving set/add/rename/remove for env files, verified by
+  re-parsing every result.
 - `scan --env development|preview|production|test`: ENV008 uses the files Next.js loads for that
   context (preview: `.env.preview*` over `.env.production`); `info` when a deployed context has no
   file of its own.
 - `visibility: "plain" | "sensitive" | "secret"` config field (`secret` remains as shorthand).
-- UTF-16 env files are reported as not scanned (`unsupported-encoding`).
+- UTF-16 env files are reported as not scanned (`unsupported-encoding`); a stray NUL byte in a
+  UTF-8 env file does not count. Config error messages quote an invalid key only if it is short and
+  name-like.
 - Env files accept dotenv's `KEY: value` form; root env file names match case-insensitively.
 - ENV011 (warning): a `.env.example` entry that is not declared in the config.
 - ENV008 (required variable has no value in the selected context's env files), ENV009 (set in an env file but not

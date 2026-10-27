@@ -1,0 +1,17 @@
+{
+  "name": "@envsync-internal/env-edit",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@envsync-internal/schema": "workspace:*"
+  }
+}

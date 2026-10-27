@@ -32,10 +32,22 @@ export type SkippedPath = {
   reason: "symlink" | "unreadable" | "too-large" | "parse-failed" | "limit-reached" | "unsupported-encoding";
 };
 
-/** A UTF-16 byte-order mark, or NUL bytes (UTF-16 text without a BOM, or not text at all). */
+/**
+ * A UTF-16 byte-order mark, or NUL bytes at UTF-16's rate: ASCII text in UTF-16 has a NUL in every
+ * other byte. A stray NUL in a UTF-8 file does not count, so it cannot hide the file from the
+ * credential checks (dotenv would still load it).
+ */
 function isProbablyUtf16(bytes: Buffer): boolean {
   if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) return true;
-  return bytes.subarray(0, 4096).includes(0);
+  const sample = bytes.subarray(0, 4096);
+  let evenNuls = 0;
+  let oddNuls = 0;
+  for (let i = 0; i < sample.length; i++) {
+    if (sample[i] !== 0) continue;
+    if (i % 2 === 0) evenNuls++;
+    else oddNuls++;
+  }
+  return Math.max(evenNuls, oddNuls) >= Math.max(2, sample.length / 8);
 }
 
 export type ScanLimits = { maxFiles: number; maxTotalBytes: number };

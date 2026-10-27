@@ -31,11 +31,37 @@ export type ParsedEnvFile = {
 const KEY_CHAR = /[\w.-]/;
 const QUOTES = new Set(["'", '"', "`"]);
 
+/** One assignment as written, including repeats of a name; for editors that need to know where it is. */
+export type EnvAssignment = EnvFileEntry & {
+  /** Last line the assignment occupies (a quoted value or unquoted PEM block may span lines). */
+  endLine: number;
+  exported: boolean;
+};
+
+export type ParsedEnvAssignments = { assignments: EnvAssignment[]; invalidLines: number[] };
+
 export function parseEnvFile(text: string): ParsedEnvFile {
-  const body = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).replace(/\r\n?/g, "\n");
+  const { assignments, invalidLines } = parseEnvAssignments(text);
   const byName = new Map<string, EnvFileEntry>();
   const firstLines = new Map<string, number>();
   const duplicates: EnvFileDuplicate[] = [];
+  for (const { name, line, value, quote } of assignments) {
+    const firstLine = firstLines.get(name);
+    if (firstLine === undefined) firstLines.set(name, line);
+    else duplicates.push({ name, line, firstLine });
+    byName.delete(name); // keep entries ordered by the assignment that takes effect
+    byName.set(name, { name, line, value, ...(quote === undefined ? {} : { quote }) });
+  }
+  return { entries: [...byName.values()].sort((a, b) => a.line - b.line), duplicates, invalidLines };
+}
+
+/**
+ * Every assignment in order, with the line range it occupies. Lines are counted as `parseEnvFile`
+ * counts them: `\r\n`, `\n` and a lone `\r` each end a line.
+ */
+export function parseEnvAssignments(text: string): ParsedEnvAssignments {
+  const body = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).replace(/\r\n?/g, "\n");
+  const assignments: EnvAssignment[] = [];
   const invalidLines: number[] = [];
 
   let position = 0;
@@ -49,7 +75,8 @@ export function parseEnvFile(text: string): ParsedEnvFile {
       ({ position, line } = nextLine(lineEnd, line));
       continue;
     }
-    if (body.startsWith("export", cursor) && /[ \t]/.test(body[cursor + 6] ?? "")) cursor = skipBlanks(body, cursor + 6, lineEnd);
+    const exported = body.startsWith("export", cursor) && /[ \t]/.test(body[cursor + 6] ?? "");
+    if (exported) cursor = skipBlanks(body, cursor + 6, lineEnd);
 
     const keyStart = cursor;
     while (cursor < lineEnd && KEY_CHAR.test(body[cursor] as string)) cursor++;
@@ -83,31 +110,32 @@ export function parseEnvFile(text: string): ParsedEnvFile {
         quote = wrapped[1] as EnvFileEntry["quote"];
         value = wrapped[2] as string;
       }
-      // An unquoted PEM block pasted across lines: dotenv keeps only the first line, but the
-      // following lines are key material, never assignments. Skip them up to the END line so a
-      // base64 line ending in `=` is not read as a variable name (names are printed by default).
+      // An unquoted PEM block pasted across lines: dotenv keeps only the first line, and the
+      // following base64 lines are key material, not assignments. Skip them (and the END line) so a
+      // base64 line ending in `=` is not read as a variable name. Only lines that look like key
+      // material are skipped: the first other line ends the block and is parsed normally, so a
+      // block without an END line cannot swallow real assignments that dotenv would read.
       if (/^-----BEGIN [A-Z0-9 ]+-----$/.test(value)) {
         let next = lineEnd;
         while (next < body.length) {
           const following = indexOrEnd(body, "\n", next + 1);
+          const content = body.slice(next + 1, following).trim();
+          const isEnd = content.includes("-----END ");
+          if (!isEnd && !/^[A-Za-z0-9+/]+={0,2}$/.test(content)) break;
           line++;
           end = following;
-          if (body.slice(next + 1, following).includes("-----END ")) break;
+          if (isEnd) break;
           next = following;
         }
       }
     }
 
-    const firstLine = firstLines.get(name);
-    if (firstLine === undefined) firstLines.set(name, startLine);
-    else duplicates.push({ name, line: startLine, firstLine });
-    byName.delete(name); // keep entries ordered by the assignment that takes effect
-    byName.set(name, { name, line: startLine, value, ...(quote === undefined ? {} : { quote }) });
+    assignments.push({ name, line: startLine, endLine: line, value, ...(quote === undefined ? {} : { quote }), exported });
 
     ({ position, line } = nextLine(end, line));
   }
 
-  return { entries: [...byName.values()].sort((a, b) => a.line - b.line), duplicates, invalidLines };
+  return { assignments, invalidLines };
 }
 
 /**

@@ -1,0 +1,106 @@
+body {
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  padding: 0 16px 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+h1 {
+  font-size: 1.2em;
+  font-weight: 600;
+  margin: 12px 0;
+}
+
+.environment {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, transparent);
+  vertical-align: top;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  padding: 2px 4px;
+  font-family: var(--vscode-editor-font-family);
+}
+
+td.value {
+  min-width: 18em;
+}
+
+button {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: none;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+button.link {
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  padding: 0 4px;
+}
+
+button.danger {
+  color: var(--vscode-errorForeground);
+}
+
+.masked {
+  letter-spacing: 2px;
+  margin-right: 6px;
+}
+
+.issue {
+  display: block;
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.issue.credential-in-public,
+.issue.type-mismatch {
+  color: var(--vscode-editorError-foreground);
+}
+
+.hint,
+.description {
+  color: var(--vscode-descriptionForeground);
+}
+
+.notice {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+  background: var(--vscode-editorWidget-background);
+}
+
+form.add {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  max-width: 48em;
+}

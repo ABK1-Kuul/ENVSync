@@ -120,7 +120,7 @@ export function parseConfigSource(sourceText: string, fileName = "envsync.config
     } else {
       issues.push({
         kind: "invalid",
-        message: name === undefined ? "Unsupported entry in the config object." : `Unknown config key \`${name}\`.`,
+        message: name === undefined ? "Unsupported entry in the config object." : `Unknown config key${quotedIfSafe(name)}.`,
         suggestion: "The config object supports only the `variables` key.",
         location: at(property),
       });
@@ -170,10 +170,10 @@ export function parseConfigSource(sourceText: string, fileName = "envsync.config
     if (!isValidVariableName(name)) {
       issues.push({
         kind: "invalid",
-        message: `\`${name}\` is not a valid environment variable name.`,
+        message: `The variable name${quotedIfSafe(name)} is not a valid environment variable name.`,
         suggestion: "Use letters, digits and underscores only, not starting with a digit (for example `API_URL`).",
         location,
-        variableName: name,
+        ...(isSafeToQuote(name) ? { variableName: name } : {}),
       });
       continue;
     }
@@ -223,7 +223,7 @@ function parseDefinition(
       continue;
     }
     if (!isDefinitionField(field)) {
-      invalid(property, `Unknown field \`${field}\` in the definition of ${name}.`, `Supported fields are: ${DEFINITION_FIELDS.join(", ")}.`);
+      invalid(property, `Unknown field${quotedIfSafe(field)} in the definition of ${name}.`, `Supported fields are: ${DEFINITION_FIELDS.join(", ")}.`);
       continue;
     }
     if (seenFields.has(field)) {
@@ -292,6 +292,20 @@ function parseDefinition(
   }
 
   return definition;
+}
+
+/**
+ * Keys that failed validation are untrusted text from the config. They are quoted in messages only
+ * when short and made of name-like characters; anything else (long, spaced, random-looking, possibly
+ * a pasted value) is reported by location alone.
+ */
+function isSafeToQuote(text: string): boolean {
+  if (!/^[A-Za-z0-9_.-]{1,32}$/.test(text)) return false;
+  return !(text.length >= 16 && /[a-z]/.test(text) && /[A-Z]/.test(text) && /[0-9]/.test(text));
+}
+
+function quotedIfSafe(text: string): string {
+  return isSafeToQuote(text) ? ` \`${text}\`` : "";
 }
 
 /**

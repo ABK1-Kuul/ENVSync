@@ -4,8 +4,9 @@ import tseslint from "typescript-eslint";
 
 export default defineConfig(
   {
-    // Fixtures are sample projects that are parsed, never run; build output is generated.
-    ignores: ["**/dist/**", "**/node_modules/**", "coverage/**", "tests/fixtures/**"],
+    // Fixtures are sample projects that are parsed, never run; build output is generated;
+    // .vscode-test holds the VS Code downloaded for the extension's tests.
+    ignores: ["**/dist/**", "**/dist-test/**", "**/dist-pkg/**", "**/.vscode-test/**", "**/node_modules/**", "coverage/**", "tests/fixtures/**"],
   },
   js.configs.recommended,
   tseslint.configs.recommended,
@@ -24,9 +25,17 @@ export default defineConfig(
   },
   {
     files: ["**/*.js", "**/*.mjs"],
-    ignores: ["site/**"],
+    ignores: ["site/**", "apps/vscode/media/**"],
     languageOptions: {
       globals: { process: "readonly", console: "readonly", URL: "readonly", Buffer: "readonly" },
+    },
+  },
+  {
+    // The extension's table webview runs in a sandboxed browser frame.
+    files: ["apps/vscode/media/**/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: { window: "readonly", document: "readonly", acquireVsCodeApi: "readonly" },
     },
   },
   {

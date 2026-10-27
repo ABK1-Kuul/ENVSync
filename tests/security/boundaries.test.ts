@@ -11,7 +11,14 @@ import { describe, expect, test } from "vitest";
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const PRODUCT_SOURCE_DIRS = ["packages/core/src", "packages/schema/src", "packages/parser-next/src", "apps/cli/src"];
+const PRODUCT_SOURCE_DIRS = [
+  "packages/core/src",
+  "packages/schema/src",
+  "packages/parser-next/src",
+  "packages/env-edit/src",
+  "apps/cli/src",
+  "apps/vscode/src",
+];
 
 const FORBIDDEN: [string, RegExp][] = [
   ["eval", /\beval\s*\(/],
@@ -53,7 +60,7 @@ describe("product source cannot execute project code or reach the network", asyn
   test("no invisible control, line-separator or bidi characters hide in product or test source", async () => {
     // Same table as output sanitization; tab, CR and LF are ordinary in source files.
     const isHidden = (code: number) => code !== 0x09 && code !== 0x0d && isUnsafeCodePoint(code, { allowNewline: true });
-    const testDirs = ["packages/core/test", "packages/schema/test", "packages/parser-next/test", "apps/cli/test", "tests"];
+    const testDirs = ["packages/core/test", "packages/schema/test", "packages/parser-next/test", "packages/env-edit/test", "apps/cli/test", "apps/vscode/test", "tests"];
     const testFiles = (await Promise.all(testDirs.map((dir) => listSourceFiles(path.join(REPO_ROOT, dir))))).flat();
     const offenders: string[] = [];
     for (const file of [...files, ...testFiles]) {
@@ -66,6 +73,13 @@ describe("product source cannot execute project code or reach the network", asyn
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("the extension webview script builds the DOM without HTML parsing, evaluation or network access", async () => {
+    const script = await readFile(path.join(REPO_ROOT, "apps/vscode/media/table.js"), "utf8");
+    for (const pattern of [/innerHTML|outerHTML|insertAdjacentHTML|document\.write/, /\beval\s*\(|new\s+Function/, /\bfetch\s*\(|WebSocket|XMLHttpRequest|sendBeacon/]) {
+      expect(script).not.toMatch(pattern);
+    }
   });
 
   test("CI installs exactly the pnpm version pinned in packageManager", async () => {

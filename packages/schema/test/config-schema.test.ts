@@ -274,3 +274,27 @@ describe("visibility", () => {
     ]);
   });
 });
+
+describe("untrusted key text in messages", () => {
+  test("short, name-like keys are quoted; long, spaced or random-looking ones are reported by location only", () => {
+    const secretLike = "sk_live_Abc123Def456Ghi789Jkl012Mno345";
+    const { issues } = parseConfigSource(
+      `export default { variables: { "${secretLike}": {}, "has space": {}, "lower-case": {}, A: { colour: 1, "${secretLike}": 1 } }, settngs: {}, "${secretLike}": {} };`,
+    );
+    const text = JSON.stringify(issues);
+    expect(text).not.toContain(secretLike);
+    expect(text).not.toContain("has space");
+    expect(issues.map((issue) => issue.message)).toEqual(
+      expect.arrayContaining([
+        "Unknown config key `settngs`.",
+        "Unknown config key.",
+        "The variable name `lower-case` is not a valid environment variable name.",
+        "The variable name is not a valid environment variable name.",
+        "Unknown field `colour` in the definition of A.",
+        "Unknown field in the definition of A.",
+      ]),
+    );
+    // Every issue still has a location to point the user at.
+    expect(issues.every((issue) => issue.location !== undefined)).toBe(true);
+  });
+});
