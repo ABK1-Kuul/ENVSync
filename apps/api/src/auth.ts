@@ -21,10 +21,32 @@ export function createTokenVerifier(supabaseUrl: string, keys?: JWTVerifyGetKey)
         // Asymmetric algorithms only: a shared-secret (HS*) token is never accepted.
         algorithms: ["ES256", "RS256", "EdDSA"],
         clockTolerance: 5,
+        requiredClaims: ["exp", "sub", "session_id"],
       });
+      if (payload.is_anonymous === true) return undefined; // anonymous sign-ins have no account to protect
       return typeof payload.sub === "string" && UUID.test(payload.sub) && payload.role === "authenticated" ? payload.sub : undefined;
     } catch {
       return undefined;
+    }
+  };
+}
+
+/** Whether the token's session is still live (not signed out or revoked). */
+export type SessionChecker = (token: string) => Promise<boolean>;
+
+/**
+ * Asks Supabase Auth whether the session behind a token is still valid. Access tokens stay
+ * cryptographically valid until they expire, even after sign-out; this closes that window for
+ * high-impact actions (revealing a Sensitive value).
+ */
+export function createSessionChecker(supabaseUrl: string, anonKey: string): SessionChecker {
+  const base = supabaseUrl.replace(/\/$/, "");
+  return async (token) => {
+    try {
+      const response = await fetch(`${base}/auth/v1/user`, { headers: { apikey: anonKey, authorization: `Bearer ${token}` } });
+      return response.ok;
+    } catch {
+      return false;
     }
   };
 }

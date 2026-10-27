@@ -7,7 +7,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { loadLocalEnv, requireEnv } from "./env.mjs";
+import { loadLocalEnv, redact, requireEnv } from "./env.mjs";
 
 const dryRun = process.argv.includes("--dry-run");
 const migrationsDir = fileURLToPath(new URL("../migrations/", import.meta.url));
@@ -45,7 +45,7 @@ try {
   }
 } catch (error) {
   // Database errors are reported by code and message (they describe SQL, not connection secrets).
-  console.log(`migration failed: ${error?.code ? `${error.code} ` : ""}${error?.message ?? error}`);
+  console.log(`migration failed: ${error?.code ? `${error.code} ` : ""}${redact(error?.message ?? error)}`);
   process.exitCode = 1;
 } finally {
   await sql.end({ timeout: 5 });

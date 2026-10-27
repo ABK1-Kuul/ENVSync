@@ -14,6 +14,9 @@ try {
     (select count(*)::int from envsync.variable_values) as values,
     (select count(*)::int from vault.secrets where description = 'envsync value') as vault_entries`;
   for (const [name, count] of Object.entries(counts)) console.log(`${name.padEnd(14)} ${count}`);
+} catch (error) {
+  console.log(`check failed (${error?.code ?? "unknown error"})`);
+  process.exitCode = 1;
 } finally {
   await sql.end({ timeout: 5 });
 }

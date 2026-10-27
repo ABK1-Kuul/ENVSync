@@ -44,4 +44,15 @@ recorded in the audit log.
 - Sensitive and Secret values are stored in Supabase Vault through private database functions. The
   API's role cannot read Vault, and no function decrypts a Secret.
 - Responses, errors and audit events never contain Secret values. Errors never echo the request.
+- Even with arbitrary SQL as `envsync_api`, the database refuses to:
+  - decrypt a Secret;
+  - move or copy a value's Vault reference;
+  - hand over a workspace;
+  - reach a deleted project's data.
+
+  Column permissions, triggers and Vault entry names that tie each entry to its variable enforce
+  this. The tests try each attack.
+- Limit (by design, for now): the database trusts the API to say *which* user it acts for
+  (`envsync.user_id`). A compromised API process could act as any user, but still could not
+  decrypt Secrets. Revealing a Sensitive value also requires a live Supabase session.
 - Production will use a separate Supabase project and an external key service (ADR-018/019).

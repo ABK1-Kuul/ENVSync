@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { bearerToken, type TokenVerifier } from "./auth.js";
+import { bearerToken, type SessionChecker, type TokenVerifier } from "./auth.js";
 import type { Database, Tx } from "./db.js";
 
 /**
@@ -21,7 +21,14 @@ const NAME_PATTERN = "^[A-Za-z_][A-Za-z0-9_]*$";
 const UUID_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
 const MAX_VALUE = 65_536;
 
-export type AppDeps = { verifyToken: TokenVerifier; db: Database };
+export type AppDeps = {
+  verifyToken: TokenVerifier;
+  /** Checks that the session is still live before revealing a value. */
+  checkSession: SessionChecker;
+  db: Database;
+  /** Reveals allowed per user per minute. */
+  revealsPerMinute?: number;
+};
 
 type Visibility = (typeof VISIBILITIES)[number];
 
@@ -43,10 +50,16 @@ declare module "fastify" {
   }
 }
 
-export function buildApp({ verifyToken, db }: AppDeps): FastifyInstance {
+export function buildApp({ verifyToken, checkSession, db, revealsPerMinute = 20 }: AppDeps): FastifyInstance {
   // No request logging: bodies can hold values, and even URLs hold variable names.
   const app = Fastify({ logger: false, bodyLimit: 80_000, ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.decorateRequest("userId", "");
+  const reveals = new RateLimiter(revealsPerMinute, 60_000);
+
+  // Responses can carry Plain or revealed Sensitive values: never store them in any cache.
+  app.addHook("onSend", async (_request, reply) => {
+    reply.header("cache-control", "no-store");
+  });
 
   app.addHook("onRequest", async (request) => {
     const token = bearerToken(request.headers.authorization);
@@ -240,8 +253,11 @@ export function buildApp({ verifyToken, db }: AppDeps): FastifyInstance {
   app.post<{ Params: { projectId: string; environment: string; name: string } }>(
     "/v1/projects/:projectId/environments/:environment/variables/:name/value/reveal",
     { schema: { params: valueParams() } },
-    async (request) =>
-      db.withUser(request.userId, async (tx) => {
+    async (request) => {
+      if (!reveals.allow(request.userId)) throw new ApiError(429, "rate_limited", "Too many reveals; try again in a minute.");
+      // A signed-out session's token is still valid until it expires; refuse it for reveals.
+      if (!(await checkSession(bearerToken(request.headers.authorization) ?? ""))) throw new ApiError(401, "unauthorized", "Sign in again.");
+      return db.withUser(request.userId, async (tx) => {
         const { project, definition, environmentId } = await findTarget(tx, request.params);
         if (definition.visibility === "secret") throw new ApiError(403, "write_only", "Secret values are write-only and cannot be revealed.");
         if (definition.visibility !== "sensitive") throw new ApiError(400, "not_sensitive", "Only Sensitive values are revealed; Plain values are listed with the project.");
@@ -250,7 +266,8 @@ export function buildApp({ verifyToken, db }: AppDeps): FastifyInstance {
         const [revealed] = await tx`select envsync_private.reveal_sensitive_value(${row.id}) as value`;
         await audit(tx, request.userId, project.workspace_id, project.id, "value.revealed", `${request.params.environment}/${request.params.name}`);
         return { name: request.params.name, environment: request.params.environment, value: revealed!.value };
-      }),
+      });
+    },
   );
 
   app.get<{ Params: { projectId: string } }>("/v1/projects/:projectId/audit", { schema: { params: projectParams() } }, async (request) =>
@@ -271,7 +288,35 @@ async function ensurePersonalWorkspace(tx: Tx, userId: string): Promise<string> 
   const [workspace] = await tx`select id from envsync.workspaces where owner_id = ${userId} and kind = 'personal'`;
   await tx`insert into envsync.memberships (workspace_id, user_id, role) values (${workspace!.id}, ${userId}, 'owner')
     on conflict do nothing`;
+  // A personal workspace has exactly one member. Anything else is not used as one.
+  const others = await tx`select 1 from envsync.memberships where workspace_id = ${workspace!.id} and user_id <> ${userId} limit 1`;
+  if (others.length > 0) throw new ApiError(409, "conflict", "The personal workspace is in an unexpected state.");
   return workspace!.id as string;
+}
+
+/** Fixed-window counter per key; in memory, per process (enough for one API instance). */
+class RateLimiter {
+  private readonly windows = new Map<string, { start: number; count: number }>();
+
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+  ) {}
+
+  allow(key: string, now = Date.now()): boolean {
+    const window = this.windows.get(key);
+    if (window === undefined || now - window.start >= this.windowMs) {
+      this.windows.set(key, { start: now, count: 1 });
+      if (this.windows.size > 10_000) this.prune(now);
+      return true;
+    }
+    window.count++;
+    return window.count <= this.limit;
+  }
+
+  private prune(now: number): void {
+    for (const [key, window] of this.windows) if (now - window.start >= this.windowMs) this.windows.delete(key);
+  }
 }
 
 /** A project the user can see; another user's project is "not found", never "forbidden". */

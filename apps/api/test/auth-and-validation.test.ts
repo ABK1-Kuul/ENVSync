@@ -7,6 +7,7 @@ import type { Database } from "../src/db.js";
 const SUPABASE_URL = "https://example-project.supabase.co";
 const ISSUER = `${SUPABASE_URL}/auth/v1`;
 const USER = "4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607";
+const SESSION = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
 const FAKE_SECRET = "ENVSYNC_FAKE_SECRET_DO_NOT_LEAK";
 
 let verify: TokenVerifier;
@@ -28,14 +29,14 @@ beforeAll(async () => {
 
 describe("token verification", () => {
   test("accepts a valid Supabase access token and returns the user id from `sub`", async () => {
-    expect(await verify(await sign({ sub: USER, role: "authenticated" }))).toBe(USER);
+    expect(await verify(await sign({ sub: USER, role: "authenticated", session_id: SESSION }))).toBe(USER);
   });
 
   test("rejects wrong issuer, wrong audience, expired, anon role, missing or malformed sub", async () => {
     const rejected = [
-      await sign({ sub: USER, role: "authenticated" }, { issuer: "https://evil.example/auth/v1" }),
-      await sign({ sub: USER, role: "authenticated" }, { audience: "anon" }),
-      await sign({ sub: USER, role: "authenticated" }, { expiresIn: "-1m" }),
+      await sign({ sub: USER, role: "authenticated", session_id: SESSION }, { issuer: "https://evil.example/auth/v1" }),
+      await sign({ sub: USER, role: "authenticated", session_id: SESSION }, { audience: "anon" }),
+      await sign({ sub: USER, role: "authenticated", session_id: SESSION }, { expiresIn: "-1m" }),
       await sign({ sub: USER, role: "anon" }),
       await sign({ role: "authenticated" }),
       await sign({ sub: "not-a-uuid", role: "authenticated" }),
@@ -44,8 +45,13 @@ describe("token verification", () => {
     for (const token of rejected) expect(await verify(token)).toBeUndefined();
   });
 
+  test("rejects a token without a session id, and anonymous sign-ins (review M4)", async () => {
+    expect(await verify(await sign({ sub: USER, role: "authenticated" }))).toBeUndefined();
+    expect(await verify(await sign({ sub: USER, role: "authenticated", session_id: SESSION, is_anonymous: true }))).toBeUndefined();
+  });
+
   test("rejects a token signed with a shared secret (HS256), even with valid claims", async () => {
-    const hs256 = await new SignJWT({ sub: USER, role: "authenticated" })
+    const hs256 = await new SignJWT({ sub: USER, role: "authenticated", session_id: SESSION })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuer(ISSUER)
       .setAudience("authenticated")
@@ -69,7 +75,7 @@ describe("requests are rejected before reaching the database", () => {
     },
     close: async () => undefined,
   };
-  const app = () => buildApp({ verifyToken: verify, db: untouchable });
+  const app = () => buildApp({ verifyToken: verify, checkSession: async () => true, db: untouchable });
 
   test("no or invalid token: 401 with a fixed message", async () => {
     for (const headers of [{}, { authorization: "Bearer x.y.z" }, { authorization: `Bearer ${"a".repeat(10)}` }]) {
@@ -80,7 +86,7 @@ describe("requests are rejected before reaching the database", () => {
   });
 
   test("invalid input: 400 with a fixed message that never echoes the request", async () => {
-    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated" })}`;
+    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
     const cases = [
       { method: "GET" as const, url: "/v1/projects/not-a-uuid" },
       { method: "PUT" as const, url: `/v1/projects/${USER}/variables/1BAD`, payload: { visibility: "secret" } },
@@ -99,7 +105,7 @@ describe("requests are rejected before reaching the database", () => {
   });
 
   test("an oversized body: 413", async () => {
-    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated" })}`;
+    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
     const response = await app().inject({
       method: "PUT",
       url: `/v1/projects/${USER}/environments/production/variables/BIG/value`,
@@ -110,6 +116,23 @@ describe("requests are rejected before reaching the database", () => {
     expect(response.body).not.toContain("xxxx");
   });
 
+  test("every response says no-store (it may carry values) (review L8)", async () => {
+    const response = await app().inject({ method: "GET", url: "/v1/projects" });
+    expect(response.headers["cache-control"]).toBe("no-store");
+  });
+
+  test("reveal: a signed-out session is refused, and reveals are rate-limited, before the database (review M4/L8)", async () => {
+    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
+    const url = `/v1/projects/${USER}/environments/production/variables/KEY/value/reveal`;
+    const signedOut = buildApp({ verifyToken: verify, checkSession: async () => false, db: untouchable });
+    expect((await signedOut.inject({ method: "POST", url, headers: { authorization } })).statusCode).toBe(401);
+
+    const limited = buildApp({ verifyToken: verify, checkSession: async () => false, db: untouchable, revealsPerMinute: 2 });
+    const statuses = [];
+    for (let i = 0; i < 3; i++) statuses.push((await limited.inject({ method: "POST", url, headers: { authorization } })).statusCode);
+    expect(statuses).toEqual([401, 401, 429]);
+  });
+
   test("an unexpected failure: 500 with a fixed message, never the error's text", async () => {
     const leaky: Database = {
       withUser: async () => {
@@ -117,8 +140,8 @@ describe("requests are rejected before reaching the database", () => {
       },
       close: async () => undefined,
     };
-    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated" })}`;
-    const response = await buildApp({ verifyToken: verify, db: leaky }).inject({ method: "GET", url: "/v1/projects", headers: { authorization } });
+    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
+    const response = await buildApp({ verifyToken: verify, checkSession: async () => true, db: leaky }).inject({ method: "GET", url: "/v1/projects", headers: { authorization } });
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({ error: "internal_error", message: "Something went wrong." });
   });

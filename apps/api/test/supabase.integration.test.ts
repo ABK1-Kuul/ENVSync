@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { buildApp } from "../src/app.js";
-import { createTokenVerifier } from "../src/auth.js";
+import { createSessionChecker, createTokenVerifier } from "../src/auth.js";
 import { createDatabase, type Database } from "../src/db.js";
 
 /**
@@ -22,7 +22,7 @@ const env = (name: string) => process.env[name] ?? "";
 const FAKE_SECRET = `ENVSYNC_FAKE_SECRET_${randomBytes(6).toString("hex")}`;
 const FAKE_SENSITIVE = `ENVSYNC_FAKE_SENSITIVE_${randomBytes(6).toString("hex")}`;
 
-type User = { id: string; token: string };
+type User = { id: string; token: string; email: string; password: string };
 
 async function auth(pathname: string, init: { method: string; body?: unknown; admin?: boolean }) {
   const key = init.admin ? env("SUPABASE_SERVICE_ROLE_KEY") : env("SUPABASE_ANON_KEY");
@@ -43,7 +43,7 @@ async function createUser(): Promise<User> {
   const password = randomBytes(18).toString("base64url");
   const created = await auth("/admin/users", { method: "POST", admin: true, body: { email, password, email_confirm: true } });
   const session = await auth("/token?grant_type=password", { method: "POST", body: { email, password } });
-  return { id: String(created.id), token: String(session.access_token) };
+  return { id: String(created.id), token: String(session.access_token), email, password };
 }
 
 describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
@@ -68,7 +68,7 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
 
   beforeAll(async () => {
     db = createDatabase(env("ENVSYNC_API_DB_URL"));
-    app = buildApp({ verifyToken: createTokenVerifier(env("SUPABASE_URL")), db });
+    app = buildApp({ verifyToken: createTokenVerifier(env("SUPABASE_URL")), checkSession: createSessionChecker(env("SUPABASE_URL"), env("SUPABASE_ANON_KEY")), db });
     owner = postgres(env("SUPABASE_DB_URL"), { ssl: "require", max: 1, onnotice: () => {} });
     apiRole = postgres(env("ENVSYNC_API_DB_URL"), { ssl: "require", max: 1, prepare: false, onnotice: () => {} });
     alice = await createUser();
@@ -162,12 +162,14 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
     expect(await code(() => asUser(alice.id, (tx) => tx`select envsync_private.reveal_sensitive_value(${secretValueId})`))).toBe("42501");
     expect(await code(() => asUser(alice.id, (tx) => tx`select decrypted_secret from vault.decrypted_secrets limit 1`))).toBe("42501");
     expect(await code(() => asUser(alice.id, (tx) => tx`select secret from vault.secrets limit 1`))).toBe("42501");
-    // Storage must match visibility, even for a direct write.
+    // Storage must match visibility, even for a direct write. Clearing the Vault reference is refused
+    // by column permissions; writing plain text alongside it, by the storage check.
     expect(
       await code(() =>
         asUser(alice.id, (tx) => tx`update envsync.variable_values set plain_value = 'leak', vault_secret_id = null where id = ${secretValueId}`),
       ),
-    ).toBe("23514");
+    ).toBe("42501");
+    expect(await code(() => asUser(alice.id, (tx) => tx`update envsync.variable_values set plain_value = 'leak' where id = ${secretValueId}`))).toBe("23514");
     // Without a user, or as another user, RLS shows nothing.
     expect(await asUser(null, (tx) => tx`select id from envsync.projects`)).toHaveLength(0);
     expect(await asUser(bob.id, (tx) => tx`select id from envsync.variable_values`)).toHaveLength(0);
@@ -176,6 +178,94 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
     const definitionId = (await owner`select id from envsync.variable_definitions where project_id = ${projectId} and name = 'SECRET_KEY'`)[0]?.id as string;
     const environmentId = (await owner`select id from envsync.environments where project_id = ${projectId} and name = 'production'`)[0]?.id as string;
     expect(await code(() => asUser(bob.id, (tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x')`))).toBe("42501");
+  }, 60_000);
+
+  test("even with arbitrary SQL as the API role, a Secret cannot be re-pointed or copied to become revealable (review H1)", async () => {
+    const rows = await owner`select v.id, v.vault_secret_id, d.name from envsync.variable_values v
+      join envsync.variable_definitions d on d.id = v.definition_id where d.project_id = ${projectId}`;
+    const secretRow = rows.find((row) => row.name === "SECRET_KEY") as { id: string; vault_secret_id: string };
+    const [{ id: sensitiveDefinition }] = (await owner`select id from envsync.variable_definitions where project_id = ${projectId} and name = 'SENSITIVE_KEY'`) as unknown as [{ id: string }];
+    const [{ id: previewEnvironment }] = (await owner`select id from envsync.environments where project_id = ${projectId} and name = 'preview'`) as unknown as [{ id: string }];
+    const asAlice = (work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+      apiRole.begin(async (tx) => {
+        await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+        return work(tx);
+      });
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+
+    // A: move the Secret's row onto a Sensitive variable.
+    expect(await code(() => asAlice((tx) => tx`update envsync.variable_values set definition_id = ${sensitiveDefinition} where id = ${secretRow.id}`))).toBe("42501");
+    // B: a new Sensitive row pointing at the Secret's Vault entry.
+    expect(
+      await code(() =>
+        asAlice((tx) => tx`insert into envsync.variable_values (definition_id, environment_id, vault_secret_id) values (${sensitiveDefinition}, ${previewEnvironment}, ${secretRow.vault_secret_id})`),
+      ),
+    ).toBe("42501");
+    // Changing the reference on an existing row is refused too.
+    expect(await code(() => asAlice((tx) => tx`update envsync.variable_values set vault_secret_id = gen_random_uuid() where id = ${secretRow.id}`))).toBe("42501");
+  }, 60_000);
+
+  test("an owner cannot hand over the workspace or change its kind; only renaming is allowed (review H2, L1)", async () => {
+    const workspaceId = String((await call(alice, "GET", "/v1/me")).body?.personalWorkspaceId);
+    const asAlice = (work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+      apiRole.begin(async (tx) => {
+        await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+        return work(tx);
+      });
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+    expect(await code(() => asAlice((tx) => tx`update envsync.workspaces set owner_id = ${bob.id} where id = ${workspaceId}`))).toBe("42501");
+    expect(await code(() => asAlice((tx) => tx`update envsync.workspaces set kind = 'team' where id = ${workspaceId}`))).toBe("42501");
+    expect(await code(() => asAlice((tx) => tx`update envsync.workspaces set name = 'Renamed' where id = ${workspaceId}`))).toBe("ok");
+    expect(await code(() => asAlice((tx) => tx`insert into envsync.workspaces (kind, name, owner_id) values ('team', 'Mine', ${alice.id})`))).toBe("42501");
+  }, 60_000);
+
+  test("audit events cannot point at another workspace's project; attribution is always the signed-in user (review L2, L3)", async () => {
+    const bobProject = String((await call(bob, "POST", "/v1/projects", { name: "Bob's" })).body?.id);
+    const workspaceId = String((await call(alice, "GET", "/v1/me")).body?.personalWorkspaceId);
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+    expect(
+      await code(() =>
+        apiRole.begin(async (tx) => {
+          await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+          return tx`insert into envsync.audit_events (workspace_id, project_id, actor_id, action) values (${workspaceId}, ${bobProject}, ${alice.id}, 'fake')`;
+        }),
+      ),
+    ).toBe("42501");
+    await apiRole.begin(async (tx) => {
+      await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+      await tx`insert into envsync.variable_definitions (project_id, name, visibility, updated_by) values (${projectId}, 'FORGED_BY', 'plain', ${bob.id})`;
+    });
+    const [row] = await owner`select updated_by from envsync.variable_definitions where project_id = ${projectId} and name = 'FORGED_BY'`;
+    expect(row?.updated_by).toBe(alice.id);
+  }, 60_000);
+
+  test("a signed-out session's token cannot reveal, even though it is still unexpired (review M4)", async () => {
+    const second = await auth("/token?grant_type=password", { method: "POST", body: { email: alice.email, password: alice.password } });
+    const token = String(second.access_token);
+    await fetch(`${env("SUPABASE_URL").replace(/\/$/, "")}/auth/v1/logout?scope=local`, {
+      method: "POST",
+      headers: { apikey: env("SUPABASE_ANON_KEY"), authorization: `Bearer ${token}` },
+    });
+    const revealed = await call({ ...alice, token }, "POST", `${base()}/environments/production/variables/SENSITIVE_KEY/value/reveal`);
+    expect(revealed.status).toBe(401);
+    // The user's other session is unaffected.
+    expect((await call(alice, "POST", `${base()}/environments/production/variables/SENSITIVE_KEY/value/reveal`)).status).toBe(200);
+  }, 60_000);
+
+  test("a soft-deleted project's variables and values are unreachable, even directly (review L5)", async () => {
+    const other = String((await call(alice, "POST", "/v1/projects", { name: "To delete" })).body?.id);
+    expect((await call(alice, "PUT", `/v1/projects/${other}/variables/KEY_TO_HIDE`, { visibility: "secret" })).status).toBe(200);
+    const [{ id: definitionId }] = (await owner`select id from envsync.variable_definitions where project_id = ${other} and name = 'KEY_TO_HIDE'`) as unknown as [{ id: string }];
+    const [{ id: environmentId }] = (await owner`select id from envsync.environments where project_id = ${other} and name = 'production'`) as unknown as [{ id: string }];
+    expect((await call(alice, "DELETE", `/v1/projects/${other}`)).status).toBe(204);
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+    const asAlice = (work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+      apiRole.begin(async (tx) => {
+        await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+        return work(tx);
+      });
+    expect(await code(() => asAlice((tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x')`))).toBe("42501");
+    expect(await asAlice((tx) => tx`select id from envsync.variable_definitions where project_id = ${other}`)).toHaveLength(0);
   }, 60_000);
 
   test("visibility cannot change while values exist", async () => {
@@ -193,7 +283,10 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
     expect(remaining[0]?.count).toBe(0);
   }, 60_000);
 
-  test("no response body contained a secret value", () => {
+  test("no response body contained a secret value; the sensitive value appeared only in reveal responses", () => {
     expect(responses.join("\n")).not.toContain(FAKE_SECRET);
+    const withSensitive = responses.filter((body) => body.includes(FAKE_SENSITIVE));
+    expect(withSensitive.length).toBeGreaterThan(0);
+    for (const body of withSensitive) expect(JSON.parse(body)).toEqual({ name: "SENSITIVE_KEY", environment: "production", value: FAKE_SENSITIVE });
   });
 });

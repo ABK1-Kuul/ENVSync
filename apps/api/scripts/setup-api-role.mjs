@@ -1,12 +1,13 @@
 // Gives the API's database role (envsync_api, created by the migrations) a login with a new random
 // password, and writes its connection string to .env.local as ENVSYNC_API_DB_URL. The password is
-// never printed. Running it again rotates the password.
+// never printed, and only its SCRAM-SHA-256 verifier is sent to the database, so statement logs
+// cannot contain it. Running the script again rotates the password.
 // The connection string reuses SUPABASE_DB_URL's host and port. With Supabase's pooler, the user name
 // carries the project reference (envsync_api.<ref>), taken from SUPABASE_DB_URL's user name.
-import { randomBytes } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import postgres from "postgres";
-import { ENV_FILE, loadLocalEnv, requireEnv } from "./env.mjs";
+import { ENV_FILE, loadLocalEnv, redact, requireEnv } from "./env.mjs";
 
 loadLocalEnv();
 const { SUPABASE_DB_URL } = requireEnv("SUPABASE_DB_URL");
@@ -14,18 +15,31 @@ const ownerUrl = new URL(SUPABASE_DB_URL);
 const password = randomBytes(24).toString("base64url");
 const reference = ownerUrl.username.includes(".") ? ownerUrl.username.slice(ownerUrl.username.indexOf(".")) : "";
 
+/** Postgres's SCRAM-SHA-256 verifier format (RFC 5802/7677); the password is ASCII, so no SASLprep. */
+function scramVerifier(secret) {
+  const salt = randomBytes(16);
+  const iterations = 4096;
+  const salted = pbkdf2Sync(secret, salt, iterations, 32, "sha256");
+  const clientKey = createHmac("sha256", salted).update("Client Key").digest();
+  const storedKey = createHash("sha256").update(clientKey).digest();
+  const serverKey = createHmac("sha256", salted).update("Server Key").digest();
+  return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
+}
+
 const sql = postgres(SUPABASE_DB_URL, { ssl: "require", max: 1, connect_timeout: 15, onnotice: () => {} });
+let ok = false;
 try {
-  // ALTER ROLE cannot take a bind parameter; the password is base64url, so it cannot break quoting.
-  await sql.unsafe(`alter role envsync_api with login password '${password}' connection limit 20`);
+  // ALTER ROLE cannot take a bind parameter; the verifier is base64 and `$`-separated, never a quote.
+  await sql.unsafe(`alter role envsync_api with login password '${scramVerifier(password)}' connection limit 20`);
+  ok = true;
 } catch (error) {
-  console.log(`could not set up the API role: ${error?.code ?? ""} ${error?.message ?? error}`);
+  console.log(`could not set up the API role: ${error?.code ?? ""} ${redact(error?.message ?? String(error))}`);
   process.exitCode = 1;
 } finally {
   await sql.end({ timeout: 5 });
 }
 
-if (process.exitCode !== 1) {
+if (ok) {
   const apiUrl = new URL(SUPABASE_DB_URL);
   apiUrl.username = `envsync_api${reference}`;
   apiUrl.password = password;
@@ -35,6 +49,10 @@ if (process.exitCode !== 1) {
   const index = lines.findIndex((existing) => existing.startsWith("ENVSYNC_API_DB_URL="));
   if (index >= 0) lines[index] = line;
   else lines.splice(text.endsWith("\n") ? lines.length - 1 : lines.length, 0, line);
-  await writeFile(ENV_FILE, lines.join(text.includes("\r\n") ? "\r\n" : "\n"));
+  // Write a temporary file and rename it over .env.local, so a crash never leaves it half-written.
+  const temporary = `${ENV_FILE}.tmp-${process.pid}`;
+  await writeFile(temporary, lines.join(text.includes("\r\n") ? "\r\n" : "\n"), { mode: 0o600 });
+  await rename(temporary, ENV_FILE);
   console.log(`API role ready; ENVSYNC_API_DB_URL ${index >= 0 ? "updated" : "added"} in .env.local (password not shown).`);
+  if (index >= 0) console.log("Supabase's pooler may accept the new password only after a short delay (under a minute).");
 }
