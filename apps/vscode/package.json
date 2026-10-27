@@ -76,7 +76,8 @@
     }
   },
   "scripts": {
-    "bundle": "node scripts/bundle.mjs"
+    "bundle": "node scripts/bundle.mjs",
+    "test:e2e": "node scripts/bundle.mjs && node scripts/test-e2e.mjs"
   },
   "dependencies": {
     "@envsync-internal/core": "workspace:*",
@@ -86,6 +87,8 @@
   },
   "devDependencies": {
     "@types/vscode": "1.95.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.0.0",
     "esbuild": "0.28.2"
   }
 }

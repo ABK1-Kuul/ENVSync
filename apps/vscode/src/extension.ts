@@ -3,7 +3,7 @@ import { CONFIG_FILE_NAME, DiscoveryError, ENV_CONTEXTS, isEnvContext, ScanError
 import { nextFramework } from "@envsync-internal/parser-next";
 import * as vscode from "vscode";
 import { groupFindings } from "./diagnostics.js";
-import { EnvTableEditorProvider, TABLE_VIEW_TYPE } from "./table-editor.js";
+import { EnvTableEditorProvider, PREVIEW_SCHEME, PreviewContentProvider, TABLE_VIEW_TYPE } from "./table-editor.js";
 
 /**
  * EnvSync for VS Code: a table editor for env files, scan diagnostics in the Problems panel, and an
@@ -31,13 +31,15 @@ export function activate(context: vscode.ExtensionContext): void {
     scanTimer = setTimeout(() => void scanWorkspace(diagnostics, environment), 400);
   };
 
+  const previews = new PreviewContentProvider();
   context.subscriptions.push(
     status,
     diagnostics,
     environmentChanged,
+    vscode.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, previews),
     vscode.window.registerCustomEditorProvider(
       TABLE_VIEW_TYPE,
-      new EnvTableEditorProvider(context, () => environment, environmentChanged.event),
+      new EnvTableEditorProvider(context, () => environment, environmentChanged.event, previews),
       { webviewOptions: { retainContextWhenHidden: false }, supportsMultipleEditorsPerDocument: true },
     ),
     vscode.commands.registerCommand("envsync.openTable", async (uri?: vscode.Uri) => {

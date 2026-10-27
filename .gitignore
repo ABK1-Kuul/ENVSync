@@ -10,6 +10,10 @@ build/
 out/
 .next/
 coverage/
+dist-test/
+dist-pkg/
+.vscode-test/
+*.vsix
 *.tsbuildinfo
 
 # Tooling

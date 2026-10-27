@@ -20,6 +20,8 @@ output shape are public contracts (ADR-003); changes to them are called out expl
 - VS Code extension (`apps/vscode`, pre-release): a table editor for env files with previewed,
   format-preserving edits and conflict detection; masked secret values with explicit reveal;
   EnvSync diagnostics in the Problems panel; an environment selector. Local only, no telemetry.
+- The extension is tested inside a real VS Code (1.95.0, the minimum supported, and the latest stable)
+  and packaged as a `.vsix` with an allow-listed file set; both run in CI.
 - `@envsync-internal/env-edit`: format-preserving set/add/rename/remove for env files, verified by
   re-parsing every result.
 - `scan --env development|preview|production|test`: ENV008 uses the files Next.js loads for that

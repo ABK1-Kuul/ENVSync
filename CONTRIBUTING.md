@@ -9,6 +9,10 @@ Run the repository's actual scripts, for example:
 - `pnpm typecheck`
 - `pnpm lint`
 - `pnpm build`
+- `pnpm --filter envsync-vscode run test:e2e`: the VS Code extension's tests inside a real VS Code
+  (downloads VS Code 1.95.0 the first time; set `ENVSYNC_VSCODE_VERSION=stable` for the latest).
+- `node apps/vscode/scripts/package.mjs` (after the extension's `bundle` script): builds the
+  `.vsix` into `apps/vscode/dist-pkg/`.
 
 If a script does not exist, do not pretend it ran; either identify the correct check or propose adding it.
 

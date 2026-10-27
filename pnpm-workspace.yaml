@@ -3,3 +3,5 @@ packages:
   - "packages/*"
 allowBuilds:
   esbuild: false
+  # Only needed to sign Marketplace publishes; packaging a .vsix does not run it.
+  "@vscode/vsce-sign": false
