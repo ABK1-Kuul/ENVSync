@@ -41,6 +41,13 @@ export class TableSession {
     });
   }
 
+  /** Still open, and still the document VS Code has for this file. */
+  private isLiveDocument(): boolean {
+    if (this.document.isClosed) return false;
+    const uri = this.document.uri.toString();
+    return vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri) === this.document;
+  }
+
   async render(): Promise<void> {
     await this.deps.post({ type: "model", model: await this.model() });
   }
@@ -73,10 +80,16 @@ export class TableSession {
         }
         const text = this.document.getText();
         const proposedText = text.slice(0, decision.replacement.start) + decision.replacement.text + text.slice(decision.replacement.end);
-        const mode = confirmationMode(await this.model());
+        // Both versions must be safe to show in full for a diff: the edit itself may add a secret.
+        const mode = confirmationMode(text, proposedText, await readConfig(this.document.uri));
         if (!(await this.deps.confirm({ label: decision.label, mode, currentUri: this.document.uri, proposedText }))) return;
 
         // The file may have changed while the confirmation was open: decide again against it now.
+        // A closed or replaced document no longer tracks the file, so its version proves nothing.
+        if (!this.isLiveDocument()) {
+          await this.deps.post({ type: "notice", text: CHANGED_NOTICE });
+          return;
+        }
         const current = decideEdit(this.document.getText(), this.document.version, message.version, message.edit);
         if (current.kind !== "apply") {
           await this.deps.post({ type: "notice", text: CHANGED_NOTICE });

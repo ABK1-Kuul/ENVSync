@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as vscode from "vscode";
+import { confirmEdit, PREVIEW_SCHEME, PreviewContentProvider } from "../src/table-editor.js";
 import { TableSession, type ConfirmRequest } from "../src/table-session.js";
 
 /**
@@ -144,6 +145,70 @@ test("masked values stay out of the table model and are revealed only on request
   assert.ok(!JSON.stringify(recorder.posted).includes(FAKE_SECRET), "stale reveal refused");
   await table.handle({ type: "reveal", version: document.version, name: "API_TOKEN" });
   assert.deepEqual(recorder.posted.at(-1), { type: "revealed", name: "API_TOKEN", value: FAKE_SECRET });
+});
+
+test("confirming in dialog mode applies the edit", async () => {
+  const { document, table, recorder } = await session(".env.local", async () => true);
+  await table.handle({ type: "edit", version: document.version, edit: { kind: "set", name: "UNDECLARED_LOCAL", value: "2" } });
+  assert.equal(recorder.confirms[0]?.mode, "dialog");
+  assert.ok(document.getText().includes("UNDECLARED_LOCAL=2\n"));
+});
+
+test("a secret on a shadowed earlier line, or added by the edit, forces the dialog (review M1/M2)", async () => {
+  const shadowed = file(".env.test");
+  await vscode.workspace.fs.writeFile(shadowed, new TextEncoder().encode(`NEXT_PUBLIC_SITE_URL=postgres://u:${FAKE_SECRET}@db\nNEXT_PUBLIC_SITE_URL=https://x.example\n`));
+  const first = await session(".env.test", async () => false);
+  assert.ok(!(await first.table.model()).rows.some((row) => row.masked), "the effective value alone looks harmless");
+  await first.table.handle({ type: "edit", version: first.document.version, edit: { kind: "set", name: "NEXT_PUBLIC_SITE_URL", value: "https://y.example" } });
+  assert.equal(first.recorder.confirms[0]?.mode, "dialog");
+
+  const second = await session(".env.development", async () => false);
+  await second.table.handle({ type: "edit", version: second.document.version, edit: { kind: "add", name: "DB_PASSWORD", value: FAKE_SECRET } });
+  assert.equal(second.recorder.confirms[0]?.mode, "dialog");
+});
+
+test("a confirmed edit is not applied if the table's document was closed or replaced (review M3)", async () => {
+  const real = await vscode.workspace.openTextDocument(file(".env.development"));
+  // Stands in for a document VS Code has closed: same file, but no longer the live document.
+  const closed = new Proxy(real, { get: (target, property) => (property === "isClosed" ? true : Reflect.get(target, property, target)) });
+  const recorder: Recorder = { posted: [], confirms: [] };
+  const table = new TableSession(closed, {
+    post: async (message) => void recorder.posted.push(message),
+    environment: () => "development",
+    confirm: async () => true,
+    openText: async () => undefined,
+  });
+  const before = real.getText();
+  await table.handle({ type: "edit", version: real.version, edit: { kind: "set", name: "LOG_LEVEL", value: "warn" } });
+  assert.equal(real.getText(), before);
+  assert.match(notices(recorder)[0] ?? "", /changed after the table was shown/);
+});
+
+test("the real diff preview opens, is cancelled if the file changes, and is closed and emptied afterwards (review L1/L2)", async () => {
+  const document = await vscode.workspace.openTextDocument(file(".env.development"));
+  const previews = new PreviewContentProvider();
+  const proposed = document.getText().replace("LOG_LEVEL=", "LOG_LEVEL=x");
+  const decision = confirmEdit({ label: "EnvSync: change the value of LOG_LEVEL", mode: "diff", currentUri: document.uri, proposedText: proposed }, previews);
+  const diffTab = await waitFor(
+    () =>
+      vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .find((tab) => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.scheme === PREVIEW_SCHEME),
+    "the diff tab",
+  );
+  const previewUri = (diffTab.input as vscode.TabInputTextDiff).modified;
+  assert.equal(previews.provideTextDocumentContent(previewUri), proposed);
+  assert.match(previewUri.query, /^[0-9a-f]{32}$/, "unguessable preview address");
+
+  const concurrent = new vscode.WorkspaceEdit();
+  concurrent.insert(document.uri, new vscode.Position(0, 0), "# changed during preview\n");
+  assert.ok(await vscode.workspace.applyEdit(concurrent));
+  assert.equal(await decision, false, "cancelled because the file changed");
+  assert.equal(previews.provideTextDocumentContent(previewUri), "", "preview text forgotten");
+  const stillOpen = vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .some((tab) => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === previewUri.toString());
+  assert.equal(stillOpen, false, "diff tab closed");
 });
 
 test("malformed webview messages are ignored", async () => {

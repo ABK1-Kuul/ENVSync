@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { groupFindings } from "../src/diagnostics.js";
 import { decideEdit, describeEdit } from "../src/edit-handler.js";
 import { parseWebviewMessage } from "../src/messages.js";
-import { buildTableModel, revealValue } from "../src/model.js";
+import { buildTableModel, isSafeToDisplay, revealValue } from "../src/model.js";
 
 const FAKE_SECRET = "ENVSYNC_FAKE_SECRET_DO_NOT_LEAK";
 const stripe = `sk_live_${"a1".repeat(12)}`;
@@ -137,10 +137,37 @@ describe("diagnostics for the Problems panel", () => {
 });
 
 describe("how an edit is confirmed", () => {
-  test("files with hidden values confirm by name (a diff would display them); others use the diff preview", async () => {
+  const safe = "# Development defaults\nNEXT_PUBLIC_SITE=https://example.com\nPORT_NUMBER=3000\n";
+
+  test("a diff only when both the current and the proposed file are safe to show in full", async () => {
     const { confirmationMode } = await import("../src/edit-handler.js");
-    expect(confirmationMode(model)).toBe("dialog");
-    expect(confirmationMode({ rows: [{ masked: false }, { masked: false }] })).toBe("diff");
-    expect(confirmationMode({ rows: [] })).toBe("diff");
+    expect(confirmationMode(safe, safe.replace("3000", "4000"), config)).toBe("diff");
+    // The current file already has a hidden value.
+    expect(confirmationMode(text, text, config)).toBe("dialog");
+    // No config: nothing says which values are secret.
+    expect(confirmationMode(safe, safe, null)).toBe("dialog");
+  });
+
+  test("the edit itself can make the file unsafe to show: set, add or rename to something hidden (review M2)", async () => {
+    const { confirmationMode } = await import("../src/edit-handler.js");
+    const cases = [
+      safe.replace("https://example.com", stripe), // credential-shaped value
+      `${safe}DB_PASSWORD=hunter2\n`, // private-looking name
+      safe.replace("PORT_NUMBER", "API_TOKEN"), // rename to a private-looking name
+      `${safe}DATABASE_URL=postgres://db/app\n`, // declared secret in the config
+    ];
+    for (const after of cases) expect(confirmationMode(safe, after, config)).toBe("dialog");
+  });
+
+  test("every line counts, not just the effective value of each variable (review M1)", () => {
+    // A shadowed earlier assignment holding a connection string with a password.
+    expect(isSafeToDisplay(`NEXT_PUBLIC_SITE=postgres://u:${FAKE_SECRET}@db\nNEXT_PUBLIC_SITE=https://x\n`, config)).toBe(false);
+    // A commented-out value, and a comment with a credential in it.
+    expect(isSafeToDisplay(`# OLD_KEY=${FAKE_SECRET}\nPORT_NUMBER=1\n`, config)).toBe(false);
+    expect(isSafeToDisplay(`# rotated ${stripe} last week\nPORT_NUMBER=1\n`, config)).toBe(false);
+    // A line that is not an assignment at all.
+    expect(isSafeToDisplay(`${FAKE_SECRET}\nPORT_NUMBER=1\n`, config)).toBe(false);
+    // Plain comments, blank lines and multi-line quoted plain values are fine.
+    expect(isSafeToDisplay(`# Ports\n\nPORT_NUMBER=1\nNEXT_PUBLIC_SITE="https://a\nb"\n`, config)).toBe(true);
   });
 });

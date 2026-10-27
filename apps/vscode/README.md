@@ -13,10 +13,15 @@ environment the checks use. Pre-release; not yet published to the Marketplace.
 - **Safe edits.** Change, add, rename or remove variables from the table. Comments, blank lines,
   ordering, `export`, quoting style, inline comments and line endings are kept. If the file changed
   after the table was drawn, the edit is rejected and the table refreshes.
-- **Every change is confirmed first.** In a file without hidden values, a read-only diff of the
-  change opens beside the file, and you click *Apply*. In a file with hidden values, a confirmation
-  names the change instead, because a diff would display the hidden values; use *Open as text* to
-  review the whole file. If the file changes while you are deciding, the change is not applied.
+- **Every change is confirmed first.**
+  - A read-only diff of the change opens beside the file, and you click *Apply*. This happens only
+    when nothing in the file, before or after the change, would be hidden in the table.
+  - "Anything" includes earlier duplicate lines, comments that hold values, and lines that are not
+    variables.
+  - Otherwise a confirmation names the change without showing values. Use *Open as text* to review
+    the whole file.
+  - The preview closes as soon as you decide.
+  - If the file changes, or is closed, while you are deciding, the change is not applied.
 - **Refused rather than guessed.** The table does not write:
   - a value it cannot write back exactly;
   - a value containing `$` (Next.js may read it as a reference to another variable);

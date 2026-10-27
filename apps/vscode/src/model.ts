@@ -104,6 +104,34 @@ function maskReason(name: string, value: string, visibility: string | undefined)
   return undefined;
 }
 
+/**
+ * Whether the whole text could be shown (for example in a diff) without displaying anything that
+ * would be masked in the table. Stricter than the rows: every assignment counts, including repeats
+ * that are shadowed by a later one, and every other non-blank line must be a harmless comment.
+ * Lines that are not assignments, comments holding `=` (often commented-out values) or anything
+ * credential-shaped make the text unsafe. With no config, nothing is safe (every value is masked).
+ */
+export function isSafeToDisplay(text: string, config: ParsedConfig | null): boolean {
+  if (config === null) return false;
+  const declared = new Map<string, VariableDefinition>(config.variables.map((definition) => [definition.name, definition]));
+  const { assignments, invalidLines } = parseEnvAssignments(text);
+  if (invalidLines.length > 0) return false;
+  const covered = new Set<number>();
+  for (const assignment of assignments) {
+    const definition = declared.get(assignment.name);
+    const visibility = definition === undefined ? undefined : effectiveVisibility(definition);
+    if (maskReason(assignment.name, assignment.value, visibility) !== undefined) return false;
+    for (let line = assignment.line; line <= assignment.endLine; line++) covered.add(line);
+  }
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split(/\r\n|\n|\r/);
+  return lines.every((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed === "" || covered.has(index + 1)) return true;
+    // Only remaining case: a comment (anything else would be an invalid line).
+    return !trimmed.includes("=") && !trimmed.split(/\s+/).some((word) => secretValueFormat(word) !== undefined);
+  });
+}
+
 /** The current value of `name` (the assignment that takes effect), for an explicit reveal. */
 export function revealValue(text: string, name: string): string | undefined {
   const { assignments } = parseEnvAssignments(text);

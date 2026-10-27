@@ -1,4 +1,6 @@
 import { applyEnvEdit, type EnvEdit, type TextReplacement } from "@envsync-internal/env-edit";
+import type { ParsedConfig } from "@envsync-internal/schema";
+import { isSafeToDisplay } from "./model.js";
 
 /**
  * Turns a table edit into a text replacement, or explains why not. An edit made against an older
@@ -22,12 +24,12 @@ export function decideEdit(documentText: string, documentVersion: number, reques
 }
 
 /**
- * How an edit is shown before it is applied. VS Code's diff preview displays the whole file, which
- * would expose every hidden value; files with hidden values get a confirmation that names the
- * change instead.
+ * How an edit is shown before it is applied. A diff displays the whole file before and after the
+ * change, so it is used only when both versions are safe to display in full (see
+ * `isSafeToDisplay`); otherwise the confirmation names the change and shows no values.
  */
-export function confirmationMode(model: { rows: readonly { masked: boolean }[] }): "diff" | "dialog" {
-  return model.rows.some((row) => row.masked) ? "dialog" : "diff";
+export function confirmationMode(beforeText: string, afterText: string, config: ParsedConfig | null): "diff" | "dialog" {
+  return isSafeToDisplay(beforeText, config) && isSafeToDisplay(afterText, config) ? "diff" : "dialog";
 }
 
 // Shown in VS Code's edit preview; names only, never values.
