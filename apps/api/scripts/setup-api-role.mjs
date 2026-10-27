@@ -4,27 +4,17 @@
 // cannot contain it. Running the script again rotates the password.
 // The connection string reuses SUPABASE_DB_URL's host and port. With Supabase's pooler, the user name
 // carries the project reference (envsync_api.<ref>), taken from SUPABASE_DB_URL's user name.
-import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import postgres from "postgres";
 import { ENV_FILE, loadLocalEnv, redact, requireEnv } from "./env.mjs";
+import { scramVerifier } from "./scram.mjs";
 
 loadLocalEnv();
 const { SUPABASE_DB_URL } = requireEnv("SUPABASE_DB_URL");
 const ownerUrl = new URL(SUPABASE_DB_URL);
 const password = randomBytes(24).toString("base64url");
 const reference = ownerUrl.username.includes(".") ? ownerUrl.username.slice(ownerUrl.username.indexOf(".")) : "";
-
-/** Postgres's SCRAM-SHA-256 verifier format (RFC 5802/7677); the password is ASCII, so no SASLprep. */
-function scramVerifier(secret) {
-  const salt = randomBytes(16);
-  const iterations = 4096;
-  const salted = pbkdf2Sync(secret, salt, iterations, 32, "sha256");
-  const clientKey = createHmac("sha256", salted).update("Client Key").digest();
-  const storedKey = createHash("sha256").update(clientKey).digest();
-  const serverKey = createHmac("sha256", salted).update("Server Key").digest();
-  return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
-}
 
 const sql = postgres(SUPABASE_DB_URL, { ssl: "require", max: 1, connect_timeout: 15, onnotice: () => {} });
 let ok = false;

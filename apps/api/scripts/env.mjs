@@ -16,18 +16,26 @@ export function loadLocalEnv() {
  * Removes connection details (hosts, user names, passwords from the configured database URLs) from
  * text that is about to be printed, such as a driver error message.
  */
-export function redact(text) {
+export function redact(text, env = process.env) {
   let result = String(text);
   for (const name of ["SUPABASE_DB_URL", "ENVSYNC_API_DB_URL", "SUPABASE_URL"]) {
-    const value = process.env[name];
+    const value = env[name];
     if (!value) continue;
+    let url;
     try {
-      const url = new URL(value);
-      for (const part of [url.password, decodeURIComponent(url.password), url.username, url.hostname]) {
-        if (part && part.length >= 3) result = result.split(part).join("[redacted]");
-      }
+      url = new URL(value);
     } catch {
-      // not a URL: nothing to remove
+      continue; // not a URL: nothing to remove
+    }
+    const parts = [url.password, url.username, url.hostname];
+    try {
+      parts.push(decodeURIComponent(url.password), decodeURIComponent(url.username));
+    } catch {
+      // malformed percent-encoding: the raw forms above are still removed
+    }
+    // Longest first, so a part that contains another is removed whole.
+    for (const part of parts.sort((a, b) => b.length - a.length)) {
+      if (part && part.length >= 3) result = result.split(part).join("[redacted]");
     }
   }
   return result;

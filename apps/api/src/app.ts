@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { bearerToken, type SessionChecker, type TokenVerifier } from "./auth.js";
+import { bearerToken, cachedSessionChecker, type SessionChecker, type TokenVerifier } from "./auth.js";
 import type { Database, Tx } from "./db.js";
 
 /**
@@ -23,7 +23,7 @@ const MAX_VALUE = 65_536;
 
 export type AppDeps = {
   verifyToken: TokenVerifier;
-  /** Checks that the session is still live before revealing a value. */
+  /** Checks that the session is still live (every request, cached briefly; reveals always fresh). */
   checkSession: SessionChecker;
   db: Database;
   /** Reveals allowed per user per minute. */
@@ -47,6 +47,7 @@ const notFound = () => new ApiError(404, "not_found", "Not found.");
 declare module "fastify" {
   interface FastifyRequest {
     userId: string;
+    sessionId: string;
   }
 }
 
@@ -54,18 +55,25 @@ export function buildApp({ verifyToken, checkSession, db, revealsPerMinute = 20 
   // No request logging: bodies can hold values, and even URLs hold variable names.
   const app = Fastify({ logger: false, bodyLimit: 80_000, ajv: { customOptions: { removeAdditional: false, coerceTypes: false } } });
   app.decorateRequest("userId", "");
+  app.decorateRequest("sessionId", "");
   const reveals = new RateLimiter(revealsPerMinute, 60_000);
+  const sessionIsLive = cachedSessionChecker(checkSession);
 
   // Responses can carry Plain or revealed Sensitive values: never store them in any cache.
   app.addHook("onSend", async (_request, reply) => {
     reply.header("cache-control", "no-store");
   });
 
+  // Every request: a valid token for a session that is still live (signed-out sessions are refused
+  // within seconds, not only when the token expires).
   app.addHook("onRequest", async (request) => {
     const token = bearerToken(request.headers.authorization);
-    const userId = token === undefined ? undefined : await verifyToken(token);
-    if (userId === undefined) throw new ApiError(401, "unauthorized", "Sign in again.");
-    request.userId = userId;
+    const verified = token === undefined ? undefined : await verifyToken(token);
+    if (token === undefined || verified === undefined || !(await sessionIsLive(token, verified.sessionId))) {
+      throw new ApiError(401, "unauthorized", "Sign in again.");
+    }
+    request.userId = verified.userId;
+    request.sessionId = verified.sessionId;
   });
 
   app.setErrorHandler((error: unknown, _request: FastifyRequest, reply: FastifyReply) => {
@@ -79,6 +87,7 @@ export function buildApp({ verifyToken, checkSession, db, revealsPerMinute = 20 
     // Database errors: fixed messages by SQLSTATE; details (which can quote rows) are never sent.
     if (code === "42501") return reply.status(403).send({ error: "forbidden", message: "Not allowed." });
     if (code === "23505") return reply.status(409).send({ error: "conflict", message: "It already exists." });
+    if (code === "40001") return reply.status(409).send({ error: "changed", message: "The variable changed while saving; try again." });
     if (code === "23514" || code === "23503") return reply.status(409).send({ error: "conflict", message: "The change conflicts with existing data." });
     return reply.status(500).send({ error: "internal_error", message: "Something went wrong." });
   });
@@ -227,7 +236,7 @@ export function buildApp({ verifyToken, checkSession, db, revealsPerMinute = 20 
             returning revision, updated_at`;
           result = row as typeof result;
         } else {
-          const [row] = await tx`select * from envsync_private.set_protected_value(${definition.id}, ${environmentId}, ${request.body.value})`;
+          const [row] = await tx`select * from envsync_private.set_protected_value(${definition.id}, ${environmentId}, ${request.body.value}, ${definition.visibility})`;
           result = row as typeof result;
         }
         await audit(tx, request.userId, project.workspace_id, project.id, "value.set", `${request.params.environment}/${request.params.name}`);
@@ -254,9 +263,12 @@ export function buildApp({ verifyToken, checkSession, db, revealsPerMinute = 20 
     "/v1/projects/:projectId/environments/:environment/variables/:name/value/reveal",
     { schema: { params: valueParams() } },
     async (request) => {
+      // Reveals check the session afresh (no cache), then count against the per-user limit, so a
+      // signed-out token cannot use up the user's quota.
+      if (!(await sessionIsLive(bearerToken(request.headers.authorization) ?? "", request.sessionId, true))) {
+        throw new ApiError(401, "unauthorized", "Sign in again.");
+      }
       if (!reveals.allow(request.userId)) throw new ApiError(429, "rate_limited", "Too many reveals; try again in a minute.");
-      // A signed-out session's token is still valid until it expires; refuse it for reveals.
-      if (!(await checkSession(bearerToken(request.headers.authorization) ?? ""))) throw new ApiError(401, "unauthorized", "Sign in again.");
       return db.withUser(request.userId, async (tx) => {
         const { project, definition, environmentId } = await findTarget(tx, request.params);
         if (definition.visibility === "secret") throw new ApiError(403, "write_only", "Secret values are write-only and cannot be revealed.");
@@ -294,7 +306,10 @@ async function ensurePersonalWorkspace(tx: Tx, userId: string): Promise<string> 
   return workspace!.id as string;
 }
 
-/** Fixed-window counter per key; in memory, per process (enough for one API instance). */
+/**
+ * Fixed-window counter per key, in memory and per process: enough for one API instance. A burst of
+ * up to twice the limit can pass at a window boundary; a shared store is needed for several instances.
+ */
 class RateLimiter {
   private readonly windows = new Map<string, { start: number; count: number }>();
 

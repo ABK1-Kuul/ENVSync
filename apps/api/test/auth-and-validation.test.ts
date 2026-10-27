@@ -1,7 +1,7 @@
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, test } from "vitest";
 import { buildApp } from "../src/app.js";
-import { bearerToken, createTokenVerifier, type TokenVerifier } from "../src/auth.js";
+import { bearerToken, cachedSessionChecker, createSessionChecker, createTokenVerifier, type TokenVerifier } from "../src/auth.js";
 import type { Database } from "../src/db.js";
 
 const SUPABASE_URL = "https://example-project.supabase.co";
@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 describe("token verification", () => {
   test("accepts a valid Supabase access token and returns the user id from `sub`", async () => {
-    expect(await verify(await sign({ sub: USER, role: "authenticated", session_id: SESSION }))).toBe(USER);
+    expect(await verify(await sign({ sub: USER, role: "authenticated", session_id: SESSION }))).toEqual({ userId: USER, sessionId: SESSION });
   });
 
   test("rejects wrong issuer, wrong audience, expired, anon role, missing or malformed sub", async () => {
@@ -121,16 +121,42 @@ describe("requests are rejected before reaching the database", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
-  test("reveal: a signed-out session is refused, and reveals are rate-limited, before the database (review M4/L8)", async () => {
+  test("a signed-out session is refused on every route, before the database (review M-B)", async () => {
+    const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
+    const signedOut = buildApp({ verifyToken: verify, checkSession: async () => false, db: untouchable });
+    for (const [method, url] of [
+      ["GET", "/v1/projects"],
+      ["GET", `/v1/projects/${USER}`],
+      ["DELETE", `/v1/projects/${USER}`],
+      ["POST", `/v1/projects/${USER}/environments/production/variables/KEY/value/reveal`],
+    ] as const) {
+      expect((await signedOut.inject({ method, url, headers: { authorization } })).statusCode, url).toBe(401);
+    }
+  });
+
+  test("reveals check the session afresh, and only then count against the rate limit (review M4/L8, Low 5)", async () => {
     const authorization = `Bearer ${await sign({ sub: USER, role: "authenticated", session_id: SESSION })}`;
     const url = `/v1/projects/${USER}/environments/production/variables/KEY/value/reveal`;
-    const signedOut = buildApp({ verifyToken: verify, checkSession: async () => false, db: untouchable });
-    expect((await signedOut.inject({ method: "POST", url, headers: { authorization } })).statusCode).toBe(401);
-
-    const limited = buildApp({ verifyToken: verify, checkSession: async () => false, db: untouchable, revealsPerMinute: 2 });
+    let live = true;
+    let checks = 0;
+    const app = buildApp({
+      verifyToken: verify,
+      checkSession: async () => {
+        checks++;
+        return live;
+      },
+      db: untouchable,
+      revealsPerMinute: 2,
+    });
+    // Past the session check and the limit, the untouchable database answers 500.
     const statuses = [];
-    for (let i = 0; i < 3; i++) statuses.push((await limited.inject({ method: "POST", url, headers: { authorization } })).statusCode);
-    expect(statuses).toEqual([401, 401, 429]);
+    for (let i = 0; i < 3; i++) statuses.push((await app.inject({ method: "POST", url, headers: { authorization } })).statusCode);
+    expect(statuses).toEqual([500, 500, 429]);
+    // One check for the first request's onRequest (then cached), plus one fresh check per reveal.
+    expect(checks).toBe(4);
+    // Signed out: the reveal's fresh check refuses it at once, even though onRequest's answer is cached.
+    live = false;
+    expect((await app.inject({ method: "POST", url, headers: { authorization } })).statusCode).toBe(401);
   });
 
   test("an unexpected failure: 500 with a fixed message, never the error's text", async () => {
@@ -144,5 +170,39 @@ describe("requests are rejected before reaching the database", () => {
     const response = await buildApp({ verifyToken: verify, checkSession: async () => true, db: leaky }).inject({ method: "GET", url: "/v1/projects", headers: { authorization } });
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({ error: "internal_error", message: "Something went wrong." });
+  });
+});
+
+describe("session checks (review M-B, Low 2)", () => {
+  test("fails closed: a network error, a non-2xx answer or a timeout all mean 'not live'", async () => {
+    const throwing = createSessionChecker(SUPABASE_URL, "anon", 50, async () => {
+      throw new Error("network down");
+    });
+    const unauthorized = createSessionChecker(SUPABASE_URL, "anon", 50, async () => new Response("{}", { status: 401 }));
+    const hanging = createSessionChecker(SUPABASE_URL, "anon", 50, (_input, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+    );
+    const ok = createSessionChecker(SUPABASE_URL, "anon", 50, async () => new Response("{}", { status: 200 }));
+    expect(await throwing("t")).toBe(false);
+    expect(await unauthorized("t")).toBe(false);
+    expect(await hanging("t")).toBe(false);
+    expect(await ok("t")).toBe(true);
+  });
+
+  test("only live answers are cached, briefly, per session; `fresh` bypasses the cache", async () => {
+    let live = true;
+    let calls = 0;
+    const cached = cachedSessionChecker(async () => {
+      calls++;
+      return live;
+    }, 60_000);
+    expect(await cached("t", "s1")).toBe(true);
+    expect(await cached("t", "s1")).toBe(true);
+    expect(calls).toBe(1);
+    live = false;
+    expect(await cached("t", "s1")).toBe(true); // still cached
+    expect(await cached("t", "s1", true)).toBe(false); // fresh check sees the sign-out
+    expect(await cached("t", "s1")).toBe(false); // and the cached answer is gone
+    expect(calls).toBe(3);
   });
 });

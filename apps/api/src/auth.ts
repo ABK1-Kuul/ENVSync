@@ -5,7 +5,8 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
  * never from the request, so a client cannot act as someone else.
  */
 
-export type TokenVerifier = (token: string) => Promise<string | undefined>;
+export type VerifiedToken = { userId: string; sessionId: string };
+export type TokenVerifier = (token: string) => Promise<VerifiedToken | undefined>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -24,7 +25,9 @@ export function createTokenVerifier(supabaseUrl: string, keys?: JWTVerifyGetKey)
         requiredClaims: ["exp", "sub", "session_id"],
       });
       if (payload.is_anonymous === true) return undefined; // anonymous sign-ins have no account to protect
-      return typeof payload.sub === "string" && UUID.test(payload.sub) && payload.role === "authenticated" ? payload.sub : undefined;
+      const { sub, session_id: sessionId, role } = payload;
+      if (typeof sub !== "string" || !UUID.test(sub) || role !== "authenticated" || typeof sessionId !== "string" || sessionId === "") return undefined;
+      return { userId: sub, sessionId };
     } catch {
       return undefined;
     }
@@ -36,18 +39,41 @@ export type SessionChecker = (token: string) => Promise<boolean>;
 
 /**
  * Asks Supabase Auth whether the session behind a token is still valid. Access tokens stay
- * cryptographically valid until they expire, even after sign-out; this closes that window for
- * high-impact actions (revealing a Sensitive value).
+ * cryptographically valid until they expire, even after sign-out; this closes that window.
+ * Fails closed: an error, a timeout or any non-2xx answer means "not live".
  */
-export function createSessionChecker(supabaseUrl: string, anonKey: string): SessionChecker {
+export function createSessionChecker(supabaseUrl: string, anonKey: string, timeoutMs = 5_000, fetcher: typeof fetch = fetch): SessionChecker {
   const base = supabaseUrl.replace(/\/$/, "");
   return async (token) => {
     try {
-      const response = await fetch(`${base}/auth/v1/user`, { headers: { apikey: anonKey, authorization: `Bearer ${token}` } });
+      const response = await fetcher(`${base}/auth/v1/user`, {
+        headers: { apikey: anonKey, authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       return response.ok;
     } catch {
       return false;
     }
+  };
+}
+
+/**
+ * Remembers live sessions for a few seconds so ordinary requests do not each call Supabase Auth.
+ * Only positive answers are cached; a signed-out session is refused within `ttlMs`.
+ */
+export function cachedSessionChecker(check: SessionChecker, ttlMs = 15_000): (token: string, sessionId: string, fresh?: boolean) => Promise<boolean> {
+  const liveUntil = new Map<string, number>();
+  return async (token, sessionId, fresh = false) => {
+    const now = Date.now();
+    if (!fresh && (liveUntil.get(sessionId) ?? 0) > now) return true;
+    const live = await check(token);
+    if (live) {
+      liveUntil.set(sessionId, now + ttlMs);
+      if (liveUntil.size > 10_000) for (const [key, until] of liveUntil) if (until <= now) liveUntil.delete(key);
+    } else {
+      liveUntil.delete(sessionId);
+    }
+    return live;
   };
 }
 

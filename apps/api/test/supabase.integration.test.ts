@@ -177,7 +177,7 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
     // Another user cannot write a protected value into the project either.
     const definitionId = (await owner`select id from envsync.variable_definitions where project_id = ${projectId} and name = 'SECRET_KEY'`)[0]?.id as string;
     const environmentId = (await owner`select id from envsync.environments where project_id = ${projectId} and name = 'production'`)[0]?.id as string;
-    expect(await code(() => asUser(bob.id, (tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x')`))).toBe("42501");
+    expect(await code(() => asUser(bob.id, (tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x', 'secret')`))).toBe("42501");
   }, 60_000);
 
   test("even with arbitrary SQL as the API role, a Secret cannot be re-pointed or copied to become revealable (review H1)", async () => {
@@ -255,8 +255,12 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
   test("a soft-deleted project's variables and values are unreachable, even directly (review L5)", async () => {
     const other = String((await call(alice, "POST", "/v1/projects", { name: "To delete" })).body?.id);
     expect((await call(alice, "PUT", `/v1/projects/${other}/variables/KEY_TO_HIDE`, { visibility: "secret" })).status).toBe(200);
+    expect((await call(alice, "PUT", `/v1/projects/${other}/variables/SENS_TO_HIDE`, { visibility: "sensitive" })).status).toBe(200);
+    expect((await call(alice, "PUT", `/v1/projects/${other}/environments/production/variables/SENS_TO_HIDE/value`, { value: "hidden" })).status).toBe(200);
     const [{ id: definitionId }] = (await owner`select id from envsync.variable_definitions where project_id = ${other} and name = 'KEY_TO_HIDE'`) as unknown as [{ id: string }];
     const [{ id: environmentId }] = (await owner`select id from envsync.environments where project_id = ${other} and name = 'production'`) as unknown as [{ id: string }];
+    const [{ id: sensitiveValueId }] = (await owner`select v.id from envsync.variable_values v join envsync.variable_definitions d on d.id = v.definition_id
+      where d.project_id = ${other} and d.name = 'SENS_TO_HIDE'`) as unknown as [{ id: string }];
     expect((await call(alice, "DELETE", `/v1/projects/${other}`)).status).toBe(204);
     const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
     const asAlice = (work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
@@ -264,8 +268,123 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
         await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
         return work(tx);
       });
-    expect(await code(() => asAlice((tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x')`))).toBe("42501");
+    expect(await code(() => asAlice((tx) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'x', 'secret')`))).toBe("42501");
     expect(await asAlice((tx) => tx`select id from envsync.variable_definitions where project_id = ${other}`)).toHaveLength(0);
+    expect(await asAlice((tx) => tx`select id from envsync.environments where project_id = ${other}`)).toHaveLength(0);
+    expect(await asAlice((tx) => tx`select id from envsync.variable_values where id = ${sensitiveValueId}`)).toHaveLength(0);
+    expect(await code(() => asAlice((tx) => tx`insert into envsync.variable_definitions (project_id, name, visibility) values (${other}, 'NEW_IN_DELETED', 'plain')`))).toBe("42501");
+    expect(await code(() => asAlice((tx) => tx`select envsync_private.reveal_sensitive_value(${sensitiveValueId})`))).toBe("42501");
+  }, 60_000);
+
+  test("the API role can execute exactly the allow-listed private functions (review M-A)", async () => {
+    const rows = await owner`select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'envsync_private' and has_function_privilege('envsync_api', p.oid, 'execute') order by 1`;
+    expect(rows.map((row) => row.proname)).toEqual(["definition_workspace", "has_role", "project_workspace", "reveal_sensitive_value", "set_protected_value"]);
+    // Nothing in the schema is executable by PUBLIC...
+    const publicRows = await owner`select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'envsync_private' and has_function_privilege('public', p.oid, 'execute')`;
+    expect(publicRows).toEqual([]);
+    // ...and functions the migration owner creates later are not either: the role-wide default for
+    // functions exists and grants nothing to PUBLIC (grantee 0).
+    const [defaults] = await owner`select count(*)::int as entries,
+        count(*) filter (where exists (select 1 from aclexplode(d.defaclacl) a where a.grantee = 0 and a.privilege_type = 'EXECUTE'))::int as public_execute
+      from pg_default_acl d where d.defaclrole = current_user::regrole and d.defaclobjtype = 'f' and d.defaclnamespace = 0`;
+    expect(defaults).toEqual({ entries: 1, public_execute: 0 });
+  }, 30_000);
+
+  test("every EnvSync Vault entry is named after its variable and environment (review Low 1)", async () => {
+    const [row] = await owner`select count(*)::int as unnamed from envsync.variable_values v join vault.secrets s on s.id = v.vault_secret_id
+      where s.name is distinct from envsync_private.vault_name(v.definition_id, v.environment_id)`;
+    expect(row?.unnamed).toBe(0);
+  }, 30_000);
+
+  test("a visibility change and a first value write racing each other cannot both succeed (review M1)", async () => {
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+    for (const order of ["visibility first", "value first"] as const) {
+      const name = order === "visibility first" ? "RACE_A" : "RACE_B";
+      expect((await call(alice, "PUT", `${base()}/variables/${name}`, { visibility: "secret" })).status).toBe(200);
+      const [{ id: definitionId }] = (await owner`select id from envsync.variable_definitions where project_id = ${projectId} and name = ${name}`) as unknown as [{ id: string }];
+      const [{ id: environmentId }] = (await owner`select id from envsync.environments where project_id = ${projectId} and name = 'development'`) as unknown as [{ id: string }];
+      const second = postgres(env("ENVSYNC_API_DB_URL"), { ssl: "require", max: 1, prepare: false, onnotice: () => {} });
+      try {
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const asAlice = (sql: postgres.Sql, work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+          sql.begin(async (tx) => {
+            await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+            return work(tx);
+          });
+        const changeVisibility = (tx: postgres.TransactionSql) => tx`update envsync.variable_definitions set visibility = 'sensitive' where id = ${definitionId}`;
+        const writeValue = (tx: postgres.TransactionSql) => tx`select * from envsync_private.set_protected_value(${definitionId}, ${environmentId}, 'race', 'secret')`;
+        // The first transaction does its step and stays open; the second runs while it holds its locks.
+        const [firstStep, secondStep] = order === "visibility first" ? [changeVisibility, writeValue] : [writeValue, changeVisibility];
+        const first = code(() =>
+          asAlice(apiRole, async (tx) => {
+            await firstStep(tx);
+            await held;
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const secondResult = code(() => asAlice(second, secondStep));
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        release();
+        const results = [await first, await secondResult];
+        // Never both: the variable is either Secret with a value, or Sensitive without one.
+        expect(results.filter((result) => result === "ok"), `${order}: ${results.join(", ")}`).toHaveLength(1);
+        const [state] = await owner`select d.visibility, count(v.id)::int as values from envsync.variable_definitions d
+          left join envsync.variable_values v on v.definition_id = d.id where d.id = ${definitionId} group by d.visibility`;
+        expect(state?.visibility === "sensitive" && state.values > 0, `${order}: ${JSON.stringify(state)}`).toBe(false);
+      } finally {
+        await second.end({ timeout: 5 });
+      }
+    }
+  }, 90_000);
+
+  test("memberships, project ownership, variable placement and environments cannot be rewritten (review H2/L7)", async () => {
+    const workspaceId = String((await call(alice, "GET", "/v1/me")).body?.personalWorkspaceId);
+    const bobWorkspace = String((await call(bob, "GET", "/v1/me")).body?.personalWorkspaceId);
+    const code = async (work: () => Promise<unknown>) => work().then(() => "ok", (error: { code?: string }) => error.code);
+    const asAlice = (work: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+      apiRole.begin(async (tx) => {
+        await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+        return work(tx);
+      });
+    const attempts: [string, (tx: postgres.TransactionSql) => Promise<unknown>][] = [
+      ["membership role", (tx) => tx`update envsync.memberships set role = 'viewer' where workspace_id = ${workspaceId}`],
+      ["membership user", (tx) => tx`update envsync.memberships set user_id = ${bob.id} where workspace_id = ${workspaceId}`],
+      ["membership delete", (tx) => tx`delete from envsync.memberships where workspace_id = ${workspaceId}`],
+      ["project workspace", (tx) => tx`update envsync.projects set workspace_id = ${bobWorkspace} where id = ${projectId}`],
+      ["project hard delete", (tx) => tx`delete from envsync.projects where id = ${projectId}`],
+      ["definition project", (tx) => tx`update envsync.variable_definitions set project_id = ${projectId} where project_id = ${projectId}`],
+      ["definition name", (tx) => tx`update envsync.variable_definitions set name = 'RENAMED' where project_id = ${projectId} and name = 'PLAIN_URL'`],
+      ["environment name", (tx) => tx`update envsync.environments set name = 'preview' where project_id = ${projectId} and name = 'development'`],
+      [
+        "workspace owner via upsert",
+        (tx) => tx`insert into envsync.workspaces (kind, name, owner_id) values ('personal', 'X', ${alice.id})
+          on conflict (owner_id) where kind = 'personal' do update set owner_id = ${bob.id}`,
+      ],
+    ];
+    for (const [label, attempt] of attempts) expect(await code(() => asAlice(attempt)), label).toBe("42501");
+  }, 60_000);
+
+  test("attribution is stamped on projects and values too, including through upserts (review L3)", async () => {
+    await apiRole.begin(async (tx) => {
+      await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+      const workspaceId = String((await tx`select id from envsync.workspaces where owner_id = ${alice.id}`)[0]?.id);
+      await tx`insert into envsync.projects (workspace_id, name, created_by) values (${workspaceId}, 'Attribution', ${bob.id})`;
+    });
+    const [project] = await owner`select created_by from envsync.projects where name = 'Attribution' and workspace_id in (select id from envsync.workspaces where owner_id = ${alice.id})`;
+    expect(project?.created_by).toBe(alice.id);
+    expect((await call(alice, "PUT", `${base()}/environments/preview/variables/PLAIN_URL/value`, { value: "https://a.example" })).status).toBe(200);
+    await apiRole.begin(async (tx) => {
+      await tx`select set_config('envsync.user_id', ${alice.id}, true)`;
+      await tx`update envsync.variable_values set plain_value = 'https://b.example', updated_by = ${bob.id}
+        where definition_id = (select id from envsync.variable_definitions where project_id = ${projectId} and name = 'PLAIN_URL')
+          and environment_id = (select id from envsync.environments where project_id = ${projectId} and name = 'preview')`;
+    });
+    const [value] = await owner`select v.updated_by from envsync.variable_values v join envsync.environments e on e.id = v.environment_id
+      join envsync.variable_definitions d on d.id = v.definition_id where d.project_id = ${projectId} and d.name = 'PLAIN_URL' and e.name = 'preview'`;
+    expect(value?.updated_by).toBe(alice.id);
   }, 60_000);
 
   test("visibility cannot change while values exist", async () => {
@@ -275,7 +394,7 @@ describe.skipIf(!enabled)("Supabase integration (Phase 4 exit gate)", () => {
   test("deleting values and users removes their Vault entries", async () => {
     const vaultIds = (await owner`select v.vault_secret_id from envsync.variable_values v join envsync.variable_definitions d on d.id = v.definition_id
       where d.project_id = ${projectId} and v.vault_secret_id is not null`).map((row) => row.vault_secret_id as string);
-    expect(vaultIds).toHaveLength(2);
+    expect(vaultIds.length).toBeGreaterThanOrEqual(2);
     expect((await call(alice, "DELETE", `${base()}/environments/production/variables/SENSITIVE_KEY/value`)).status).toBe(204);
     // Deleting the user cascades to the workspace, project, values and their Vault entries.
     await auth(`/admin/users/${alice.id}`, { method: "DELETE", admin: true });
