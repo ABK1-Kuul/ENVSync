@@ -27,7 +27,7 @@ export default defineConfig(
     files: ["**/*.js", "**/*.mjs"],
     ignores: ["site/**", "apps/vscode/media/**"],
     languageOptions: {
-      globals: { process: "readonly", console: "readonly", URL: "readonly", Buffer: "readonly" },
+      globals: { process: "readonly", console: "readonly", URL: "readonly", Buffer: "readonly", fetch: "readonly" },
     },
   },
   {
