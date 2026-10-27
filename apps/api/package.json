@@ -1,0 +1,24 @@
+{
+  "name": "@envsync-internal/api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "EnvSync cloud API (Phase 4): accounts, projects, environments and write-only secrets on Supabase.",
+  "scripts": {
+    "migrate": "node scripts/migrate.mjs",
+    "setup-role": "node scripts/setup-api-role.mjs",
+    "check-env": "node scripts/check-env.mjs",
+    "bundle": "node scripts/bundle.mjs",
+    "start": "node --env-file=../../.env.local dist/server.mjs"
+  },
+  "dependencies": {
+    "@envsync-internal/schema": "workspace:*",
+    "fastify": "5.12.5",
+    "jose": "6.2.12",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

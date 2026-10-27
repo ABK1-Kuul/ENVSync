@@ -1,0 +1,47 @@
+# EnvSync cloud API (in development)
+
+The API behind EnvSync's cloud workspace: Supabase Auth sign-in, projects with Development,
+Preview and Production environments, variable definitions, and values. Values marked Secret can be
+written but never read back. Sensitive values can be revealed only by an explicit request, which is
+recorded in the audit log.
+
+## Setup (development project only)
+
+1. In `.env.local` at the repository root (gitignored; never commit it), set:
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`;
+   - `SUPABASE_DB_URL`: the **Session pooler** connection string (Supabase dashboard → *Connect*). The
+     direct database host is IPv6-only on recent projects, and many networks cannot reach it.
+2. Check the settings. This prints whether each one is set and what kind of connection string it
+   holds, never the values:
+   ```
+   node apps/api/scripts/check-env.mjs
+   node apps/api/scripts/db-check.mjs
+   node apps/api/scripts/auth-check.mjs
+   ```
+3. Create the schema: `node apps/api/scripts/migrate.mjs` (add `--dry-run` to see what would run).
+4. Give the API its own least-privilege database login:
+   `node apps/api/scripts/setup-api-role.mjs`. It writes `ENVSYNC_API_DB_URL` to `.env.local`
+   without printing it. Run it again to rotate the password.
+5. Run the API locally (listens on `127.0.0.1:8787`):
+   ```
+   node apps/api/scripts/bundle.mjs
+   node --env-file=.env.local apps/api/dist/server.mjs
+   ```
+
+## Tests
+
+- `pnpm test` runs the unit tests (no network): token verification and request validation.
+- The exit-gate tests run against the development project and are opt-in. They create and delete
+  two throwaway users:
+  `ENVSYNC_API_INTEGRATION=1 pnpm exec vitest run apps/api/test/supabase.integration.test.ts`
+
+## Security model
+
+- The API connects as `envsync_api`, never as `postgres`. Tables live in the `envsync` schema,
+  which Supabase's Data API does not expose; browser roles have no access.
+- Every query runs as the signed-in user under Row Level Security. Another user's project is
+  answered with 404.
+- Sensitive and Secret values are stored in Supabase Vault through private database functions. The
+  API's role cannot read Vault, and no function decrypts a Secret.
+- Responses, errors and audit events never contain Secret values. Errors never echo the request.
+- Production will use a separate Supabase project and an external key service (ADR-018/019).

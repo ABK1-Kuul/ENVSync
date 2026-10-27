@@ -33,6 +33,8 @@ const FORBIDDEN: [string, RegExp][] = [
   // ts.sys gives TypeScript real filesystem/module access; parsing never needs it.
   ["TypeScript system host", /\bts\.sys\b/],
   ["module loader APIs", /from\s+["'](?:node:)?module["']|\bprocess\.dlopen\b|\bimport\.meta\.resolve\b|\bprocess\.binding\b/],
+  // The cloud API (apps/api) uses these; the local tools must never import them (ADR-015).
+  ["server, database or token libraries", /from\s+["'](?:fastify|postgres|pg|jose|@supabase\/[^"']+|@envsync-internal\/api)["']/],
 ];
 
 async function listSourceFiles(directory: string): Promise<string[]> {
